@@ -9,13 +9,30 @@ import { validateRows } from "@/lib/validation-engine";
 
 const STEPS = [
   { id: 1, label: "Import" },
-  { id: 2, label: "Détection" },
-  { id: 3, label: "Mapping" },
-  { id: 4, label: "Vérification" },
-  { id: 5, label: "Validation" },
-  { id: 6, label: "Envoi" },
-  { id: 7, label: "Résultat" },
+  { id: 2, label: "Mapping" },
+  { id: 3, label: "Validation & Envoi" },
+  { id: 4, label: "Résultat" },
 ];
+
+// Fallback set for when DB field is_order_item_field is not yet loaded
+const ORDER_ITEM_FIELD_KEYS_FALLBACK = new Set([
+  "item_reference", "master_item_id", "expected_quantity", "item_packaging_type",
+  "batch_name", "batch_id", "batch_edi_erp_id", "batch_edi_wms_id",
+]);
+
+function normalizeHeader(h) {
+  return String(h).trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/['’‘]/g, "")
+    .replace(/\s+/g, "_")
+    .replace(/[^a-z0-9_]/g, "");
+}
+
+function makeFingerprint(headers) {
+  return headers.map(normalizeHeader).sort().join("|");
+}
 
 // ─── Stepper bar ─────────────────────────────────────────────────────────────
 
@@ -48,12 +65,21 @@ function Stepper({ current }) {
 
 // ─── Step 1 : Import ─────────────────────────────────────────────────────────
 
-function StepImport({ onParsed, isEmbed }) {
+function StepImport({ onParsed, onProfileSelected, isEmbed }) {
   const [dragging, setDragging] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [orderType, setOrderType] = useState("EXIT");
+  const [profiles, setProfiles] = useState([]);
+  const [loadingProfiles, setLoadingProfiles] = useState(true);
   const inputRef = useRef();
+
+  useEffect(() => {
+    fetch("/api/mapping-profiles")
+      .then(r => r.json())
+      .then(d => { setProfiles(Array.isArray(d) ? d : []); setLoadingProfiles(false); })
+      .catch(() => setLoadingProfiles(false));
+  }, []);
 
   async function handleFile(file) {
     if (!file) return;
@@ -65,12 +91,31 @@ function StepImport({ onParsed, isEmbed }) {
     const res = await fetch("/api/parse-file", { method: "POST", body: fd });
     const data = await res.json();
     if (!res.ok) { setError(data.error || "Erreur lors de la lecture du fichier."); setLoading(false); return; }
+
+    // Auto-detect a matching profile
+    const headers = (data.rows[data.headerRowIndex || 0] || []).map(h => String(h).trim());
+    if (headers.length) {
+      const detectRes = await fetch("/api/mapping-profiles/detect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ headers }),
+      });
+      const detected = await detectRes.json();
+      if (detected.match) {
+        setLoading(false);
+        onParsed({ ...data, orderType, detectedProfile: detected.match, detectedConfidence: detected.confidence });
+        return;
+      }
+    }
+
     setLoading(false);
     onParsed({ ...data, orderType });
   }
 
+  const templates = profiles.filter(p => p.is_template);
+
   return (
-    <div style={{ maxWidth: 660 }}>
+    <div style={{ maxWidth: 700 }}>
       <h1 style={styles.title}>Importer un fichier commandes</h1>
       <p style={styles.subtitle}>
         Convertissez un fichier CSV ou Excel en commande Spacefill en quelques étapes.
@@ -84,15 +129,11 @@ function StepImport({ onParsed, isEmbed }) {
             { value: "EXIT", icon: "📤", label: "Expédition (sortie)", desc: "Commandes à expédier vers un destinataire" },
             { value: "ENTRY", icon: "📥", label: "Réception (entrée)", desc: "Commandes à réceptionner d'un fournisseur" },
           ].map(t => (
-            <button
-              key={t.value}
-              onClick={() => setOrderType(t.value)}
-              style={{
-                flex: 1, padding: "16px 18px", border: `2px solid ${orderType === t.value ? "var(--primary)" : "var(--border)"}`,
-                borderRadius: 10, background: orderType === t.value ? "var(--primary-light)" : "var(--bg)",
-                cursor: "pointer", textAlign: "left", transition: "all 0.15s",
-              }}
-            >
+            <button key={t.value} onClick={() => setOrderType(t.value)} style={{
+              flex: 1, padding: "16px 18px", border: `2px solid ${orderType === t.value ? "var(--primary)" : "var(--border)"}`,
+              borderRadius: 10, background: orderType === t.value ? "var(--primary-light)" : "var(--bg)",
+              cursor: "pointer", textAlign: "left", transition: "all 0.15s",
+            }}>
               <div style={{ fontSize: 22, marginBottom: 6 }}>{t.icon}</div>
               <div style={{ fontWeight: 700, color: orderType === t.value ? "var(--primary)" : "var(--ink)", fontSize: 14 }}>{t.label}</div>
               <div style={{ fontSize: 12, color: "var(--ink-muted)", marginTop: 4 }}>{t.desc}</div>
@@ -127,57 +168,158 @@ function StepImport({ onParsed, isEmbed }) {
         {error && <div style={styles.error}>{error}</div>}
       </div>
 
+      {/* Templates section */}
+      {!loadingProfiles && templates.length > 0 && (
+        <div style={{ ...styles.card, marginTop: 16 }}>
+          <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 12 }}>📋 Templates disponibles</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {templates.map(t => (
+              <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 14px", background: "var(--bg)", borderRadius: 8, border: "1px solid var(--border)" }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontWeight: 600, fontSize: 14 }}>{t.name}</div>
+                  {t.description && <div style={{ fontSize: 12, color: "var(--ink-muted)", marginTop: 2 }}>{t.description}</div>}
+                  <div style={{ fontSize: 11, color: "var(--ink-light)", marginTop: 2 }}>{t.order_type === "EXIT" ? "Expédition" : "Réception"} · {t.mapping_rules?.length || 0} colonnes</div>
+                </div>
+                {t.template_file_url && (
+                  <a href={t.template_file_url} download style={{ ...styles.btnSecondary, fontSize: 12, padding: "6px 12px", textDecoration: "none", display: "inline-block" }}>
+                    ⬇ Télécharger
+                  </a>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Saved profiles */}
+      {!loadingProfiles && profiles.filter(p => !p.is_template).length > 0 && (
+        <div style={{ ...styles.card, marginTop: 16 }}>
+          <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 12 }}>⚡ Paramétrages sauvegardés</div>
+          <p style={{ fontSize: 13, color: "var(--ink-muted)", marginBottom: 12 }}>
+            Ces paramétrages sont détectés automatiquement à l'import. Vous pouvez aussi en appliquer un manuellement.
+          </p>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {profiles.filter(p => !p.is_template).map(p => (
+              <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 14px", background: "var(--bg)", borderRadius: 8, border: "1px solid var(--border)" }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontWeight: 600, fontSize: 14 }}>{p.name}</div>
+                  <div style={{ fontSize: 11, color: "var(--ink-muted)", marginTop: 2 }}>{p.order_type === "EXIT" ? "Expédition" : "Réception"} · {p.mapping_rules?.length || 0} colonnes · créé le {new Date(p.created_at).toLocaleDateString("fr-FR")}</div>
+                </div>
+                <button
+                  style={{ ...styles.btnSecondary, fontSize: 12, padding: "6px 12px" }}
+                  onClick={() => onProfileSelected(p)}
+                >
+                  Utiliser ce paramétrage
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {!isEmbed && (
         <div style={{ marginTop: 20, padding: "14px 18px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 10, fontSize: 13, color: "var(--ink-muted)" }}>
           💡 <strong style={{ color: "var(--ink)" }}>Intégration Spacefill :</strong> cette page peut être intégrée directement dans l'espace d'un client via{" "}
           <code style={{ background: "var(--border-light)", padding: "1px 6px", borderRadius: 4 }}>/import?customer_id=xxx&token=xxx</code>.
-          Son token est utilisé automatiquement pour créer les commandes.
         </div>
       )}
     </div>
   );
 }
 
-// ─── Step 2 : Detection ───────────────────────────────────────────────────────
+// ─── Step 2 : Detect & Map (merged) ──────────────────────────────────────────
 
-function StepDetection({ parsed, onContinue, onBack }) {
+function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefillFields, preloadedMappings, onContinue, onBack }) {
   const [headerRow, setHeaderRow] = useState(parsed.headerRowIndex || 0);
   const [delimiter, setDelimiter] = useState(parsed.delimiter || ",");
+  const [previewOpen, setPreviewOpen] = useState(false);
 
-  function getHeaders() {
-    return (parsed.rows[headerRow] || []).map(h => String(h).trim());
+  const headers = (parsed.rows[headerRow] || []).map(h => String(h).trim());
+  const [suggestions] = useState(() => suggestMappings(headers, spacefillFields));
+  const [mappings, setMappings] = useState(() => {
+    if (preloadedMappings) return preloadedMappings;
+    const m = {};
+    suggestions.forEach(s => { if (s.suggestedField) m[s.sourceColumn] = s.suggestedField.id; });
+    return m;
+  });
+  const [search, setSearch] = useState("");
+  const [saveModal, setSaveModal] = useState(false);
+  const [saveName, setSaveName] = useState("");
+  const [saveDesc, setSaveDesc] = useState("");
+  const [saveIsTemplate, setSaveIsTemplate] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [savedOk, setSavedOk] = useState(false);
+
+  const isItemField = (f) => f.is_order_item_field ?? ORDER_ITEM_FIELD_KEYS_FALLBACK.has(f.field_key);
+  const orderFields = spacefillFields.filter(f => !isItemField(f));
+  const itemFields = spacefillFields.filter(f => isItemField(f));
+
+  function fieldSection(fieldId) {
+    const field = spacefillFields.find(f => f.id === fieldId);
+    if (!field) return null;
+    return isItemField(field) ? "Articles" : "Commande";
+  }
+
+  const filteredOrderFields = orderFields.filter(f => !search || f.label.toLowerCase().includes(search.toLowerCase()) || f.field_key.toLowerCase().includes(search.toLowerCase()));
+  const filteredItemFields = itemFields.filter(f => !search || f.label.toLowerCase().includes(search.toLowerCase()) || f.field_key.toLowerCase().includes(search.toLowerCase()));
+
+  const mappedCount = Object.values(mappings).filter(Boolean).length;
+  const requiredCount = spacefillFields.filter(f => f.is_required).length;
+  const requiredMapped = spacefillFields.filter(f => f.is_required && Object.values(mappings).includes(f.id)).length;
+
+  async function handleSave() {
+    if (!saveName.trim()) return;
+    setSaving(true);
+    const fingerprint = makeFingerprint(headers);
+    await fetch("/api/mapping-profiles", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: saveName.trim(),
+        description: saveDesc.trim() || null,
+        order_type: parsed.orderType || "EXIT",
+        header_row_index: headerRow,
+        headers_fingerprint: fingerprint,
+        is_template: saveIsTemplate,
+        mappings,
+      }),
+    });
+    setSaving(false);
+    setSavedOk(true);
+    setTimeout(() => { setSaveModal(false); setSavedOk(false); }, 1500);
   }
 
   return (
-    <div style={{ maxWidth: 780 }}>
-      <h2 style={styles.title}>Détection du fichier</h2>
-      <p style={styles.subtitle}>Vérifiez les paramètres détectés automatiquement.</p>
+    <div style={{ maxWidth: 960 }}>
+      <h2 style={styles.title}>Mapping des colonnes</h2>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 20 }}>
-        <div style={styles.infoCard}>
-          <div style={styles.infoLabel}>Fichier</div>
-          <div style={styles.infoValue}>{parsed.fileName}</div>
+      {/* Auto-detected profile banner */}
+      {detectedProfile && (
+        <div style={{ background: "#f0fdf4", border: "1px solid #86efac", borderRadius: 10, padding: "12px 16px", marginBottom: 16, display: "flex", alignItems: "center", gap: 12 }}>
+          <span style={{ fontSize: 20 }}>✅</span>
+          <div>
+            <div style={{ fontWeight: 700, color: "#166534", fontSize: 14 }}>
+              Paramétrage détecté automatiquement : {detectedProfile.name}
+            </div>
+            <div style={{ fontSize: 12, color: "#166534", opacity: 0.8 }}>
+              {detectedConfidence === "exact" ? "Correspondance exacte" : "Correspondance proche"} · {detectedProfile.mapping_rules?.length || 0} colonnes pré-remplies
+            </div>
+          </div>
         </div>
-        <div style={styles.infoCard}>
-          <div style={styles.infoLabel}>Lignes détectées</div>
-          <div style={styles.infoValue}>{parsed.totalRows}</div>
-        </div>
-        <div style={styles.infoCard}>
-          <div style={styles.infoLabel}>Encodage</div>
-          <div style={styles.infoValue}>{parsed.encoding}</div>
-        </div>
-        <div style={styles.infoCard}>
-          <div style={styles.infoLabel}>Colonnes</div>
-          <div style={styles.infoValue}>{getHeaders().length}</div>
-        </div>
-      </div>
+      )}
 
-      <div style={styles.card}>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 20 }}>
+      {/* File info + detection params */}
+      <div style={{ ...styles.card, marginBottom: 16 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 16 }}>
+          <div style={styles.infoCard}><div style={styles.infoLabel}>Fichier</div><div style={{ ...styles.infoValue, fontSize: 13, wordBreak: "break-all" }}>{parsed.fileName}</div></div>
+          <div style={styles.infoCard}><div style={styles.infoLabel}>Lignes</div><div style={styles.infoValue}>{parsed.totalRows}</div></div>
+          <div style={styles.infoCard}><div style={styles.infoLabel}>Encodage</div><div style={styles.infoValue}>{parsed.encoding}</div></div>
+          <div style={styles.infoCard}><div style={styles.infoLabel}>Colonnes</div><div style={styles.infoValue}>{headers.length}</div></div>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 12, alignItems: "end" }}>
           <div>
             <label style={styles.label}>Ligne d'en-tête</label>
             <input style={styles.input} type="number" min={0} max={10} value={headerRow} onChange={e => setHeaderRow(Number(e.target.value))} />
-            <p style={{ fontSize: 12, color: "var(--ink-muted)", marginTop: 4 }}>0 = première ligne</p>
           </div>
           {parsed.delimiter !== null && (
             <div>
@@ -190,119 +332,145 @@ function StepDetection({ parsed, onContinue, onBack }) {
               </select>
             </div>
           )}
+          <button style={{ ...styles.btnSecondary, fontSize: 13, padding: "9px 14px", whiteSpace: "nowrap" }} onClick={() => setPreviewOpen(o => !o)}>
+            {previewOpen ? "▲ Masquer aperçu" : "▼ Aperçu données"}
+          </button>
         </div>
 
-        <label style={styles.label}>Aperçu des données</label>
-        <div style={{ overflowX: "auto", borderRadius: 8, border: "1px solid var(--border)" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-            <thead>
-              <tr style={{ background: "var(--bg)" }}>
-                {getHeaders().map((h, i) => (
-                  <th key={i} style={{ padding: "8px 12px", textAlign: "left", borderBottom: "1px solid var(--border)", fontWeight: 700, whiteSpace: "nowrap", color: "var(--primary)" }}>
-                    {h || `Colonne ${i + 1}`}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {parsed.rows.slice(headerRow + 1, headerRow + 6).map((row, ri) => (
-                <tr key={ri} style={{ borderBottom: "1px solid var(--border-light)" }}>
-                  {getHeaders().map((_, ci) => (
-                    <td key={ci} style={{ padding: "8px 12px", color: "var(--ink-muted)", maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {row[ci] || ""}
-                    </td>
+        {previewOpen && (
+          <div style={{ marginTop: 16, overflowX: "auto", borderRadius: 8, border: "1px solid var(--border)" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead>
+                <tr style={{ background: "var(--bg)" }}>
+                  {headers.map((h, i) => (
+                    <th key={i} style={{ padding: "8px 12px", textAlign: "left", borderBottom: "1px solid var(--border)", fontWeight: 700, whiteSpace: "nowrap", color: "var(--primary)" }}>
+                      {h || `Col. ${i + 1}`}
+                    </th>
                   ))}
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {parsed.rows.slice(headerRow + 1, headerRow + 4).map((row, ri) => (
+                  <tr key={ri} style={{ borderBottom: "1px solid var(--border-light)" }}>
+                    {headers.map((_, ci) => (
+                      <td key={ci} style={{ padding: "8px 12px", color: "var(--ink-muted)", maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {row[ci] || ""}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
-      <div style={styles.actions}>
-        <button style={styles.btnSecondary} onClick={onBack}>← Retour</button>
-        <button style={styles.btnPrimary} onClick={() => onContinue({ headerRowIndex: headerRow, delimiter })}>
-          Continuer vers le mapping →
+      {/* Mapping controls */}
+      <div style={{ display: "flex", gap: 12, marginBottom: 16, alignItems: "center" }}>
+        <div style={{ flex: 1, background: "var(--bg)", borderRadius: 8, padding: "10px 16px", border: "1px solid var(--border)" }}>
+          <span style={{ fontWeight: 700, color: "var(--primary)" }}>{mappedCount}</span>
+          <span style={{ color: "var(--ink-muted)", fontSize: 14 }}> / {headers.length} colonnes mappées</span>
+          {requiredCount > 0 && (
+            <>
+              <span style={{ margin: "0 12px", color: "var(--border)" }}>|</span>
+              <span style={{ fontWeight: 700, color: requiredMapped === requiredCount ? "var(--primary)" : "#ef4444" }}>{requiredMapped}</span>
+              <span style={{ color: "var(--ink-muted)", fontSize: 14 }}> / {requiredCount} champs obligatoires</span>
+            </>
+          )}
+        </div>
+        <button style={{ ...styles.btnSecondary, whiteSpace: "nowrap" }} onClick={() => setSaveModal(true)}>
+          💾 Sauvegarder ce paramétrage
         </button>
       </div>
-    </div>
-  );
-}
 
-// ─── Step 3 : Mapping ─────────────────────────────────────────────────────────
-
-function StepMapping({ parsed, headerRowIndex, spacefillFields, onContinue, onBack }) {
-  const headers = (parsed.rows[headerRowIndex] || []).map(h => String(h).trim());
-  const [suggestions] = useState(() => suggestMappings(headers, spacefillFields));
-  const [mappings, setMappings] = useState(() => {
-    const m = {};
-    suggestions.forEach(s => { if (s.suggestedField) m[s.sourceColumn] = s.suggestedField.id; });
-    return m;
-  });
-  const [search, setSearch] = useState("");
-
-  const filteredFields = spacefillFields.filter(f =>
-    !search || f.label.toLowerCase().includes(search.toLowerCase()) || f.field_key.toLowerCase().includes(search.toLowerCase())
-  );
-
-  const mappedCount = Object.values(mappings).filter(Boolean).length;
-  const requiredCount = spacefillFields.filter(f => f.is_required).length;
-  const requiredMapped = spacefillFields.filter(f => f.is_required && Object.values(mappings).includes(f.id)).length;
-
-  return (
-    <div style={{ maxWidth: 900 }}>
-      <h2 style={styles.title}>Mapping des colonnes</h2>
-      <p style={styles.subtitle}>Le mapping a été détecté automatiquement — ajustez si besoin.</p>
-
-      <div style={{ display: "flex", gap: 12, marginBottom: 20, alignItems: "center" }}>
-        <div style={{ flex: 1, background: "var(--bg)", borderRadius: 8, padding: "10px 16px", border: "1px solid var(--border)" }}>
-          <span style={{ fontWeight: 700, color: "var(--primary)" }}>{mappedCount}</span><span style={{ color: "var(--ink-muted)", fontSize: 14 }}> / {headers.length} colonnes mappées</span>
-          <span style={{ margin: "0 12px", color: "var(--border)" }}>|</span>
-          <span style={{ fontWeight: 700, color: requiredMapped === requiredCount ? "var(--primary)" : "#ef4444" }}>{requiredMapped}</span><span style={{ color: "var(--ink-muted)", fontSize: 14 }}> / {requiredCount} champs obligatoires</span>
+      {/* Save modal */}
+      {saveModal && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}>
+          <div style={{ background: "#fff", borderRadius: 14, padding: 28, width: 420, boxShadow: "0 20px 60px rgba(0,0,0,0.2)" }}>
+            <h3 style={{ fontWeight: 800, marginBottom: 20 }}>Sauvegarder le paramétrage</h3>
+            {savedOk ? (
+              <div style={{ textAlign: "center", padding: 20, color: "#166534", fontWeight: 700 }}>✅ Sauvegardé !</div>
+            ) : (
+              <>
+                <label style={styles.label}>Nom du paramétrage *</label>
+                <input style={{ ...styles.input, marginBottom: 14 }} value={saveName} onChange={e => setSaveName(e.target.value)} placeholder="Ex : Format client Leroy Merlin" autoFocus />
+                <label style={styles.label}>Description (optionnel)</label>
+                <input style={{ ...styles.input, marginBottom: 14 }} value={saveDesc} onChange={e => setSaveDesc(e.target.value)} placeholder="Ex : Fichier export ERP SAP" />
+                <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer", marginBottom: 20, fontSize: 14 }}>
+                  <input type="checkbox" checked={saveIsTemplate} onChange={e => setSaveIsTemplate(e.target.checked)} />
+                  Marquer comme template téléchargeable par les équipes
+                </label>
+                <div style={{ display: "flex", gap: 12 }}>
+                  <button style={styles.btnPrimary} onClick={handleSave} disabled={!saveName.trim() || saving}>
+                    {saving ? "Sauvegarde…" : "Sauvegarder"}
+                  </button>
+                  <button style={styles.btnSecondary} onClick={() => setSaveModal(false)}>Annuler</button>
+                </div>
+              </>
+            )}
+          </div>
         </div>
-      </div>
+      )}
 
       <div style={styles.card}>
+        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
+          <input placeholder="Filtrer les champs Spacefill…" style={{ ...styles.input, maxWidth: 260, fontSize: 13 }} value={search} onChange={e => setSearch(e.target.value)} />
+        </div>
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
             <thead>
               <tr style={{ background: "var(--bg)" }}>
                 <th style={styles.th}>Colonne fichier</th>
-                <th style={styles.th}>Exemple de valeur</th>
-                <th style={styles.th}>
-                  Champ Spacefill
-                  <input placeholder="Filtrer…" style={{ marginLeft: 8, fontSize: 12, padding: "2px 8px", border: "1px solid var(--border)", borderRadius: 4 }} value={search} onChange={e => setSearch(e.target.value)} />
-                </th>
-                <th style={styles.th}>Obligatoire</th>
+                <th style={styles.th}>Exemple</th>
+                <th style={styles.th}>Champ Spacefill</th>
+                <th style={styles.th}>Catégorie</th>
+                <th style={styles.th}>Requis</th>
               </tr>
             </thead>
             <tbody>
               {headers.map((header, i) => {
-                const exampleVal = (parsed.rows[headerRowIndex + 1] || [])[i] || "";
+                const exampleVal = (parsed.rows[headerRow + 1] || [])[i] || "";
                 const suggestion = suggestions[i];
                 const isAutoMapped = suggestion?.confidence >= 30 && mappings[header] === suggestion?.suggestedField?.id;
+                const isProfileMapped = !!preloadedMappings?.[header];
+                const section = fieldSection(mappings[header]);
                 return (
                   <tr key={i} style={{ borderBottom: "1px solid var(--border-light)" }}>
                     <td style={{ padding: "10px 12px", fontWeight: 600 }}>{header}</td>
-                    <td style={{ padding: "10px 12px", color: "var(--ink-muted)", fontFamily: "monospace", fontSize: 13, maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis" }}>{String(exampleVal)}</td>
+                    <td style={{ padding: "10px 12px", color: "var(--ink-muted)", fontFamily: "monospace", fontSize: 12, maxWidth: 120, overflow: "hidden", textOverflow: "ellipsis" }}>{String(exampleVal)}</td>
                     <td style={{ padding: "10px 12px" }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        {isAutoMapped && (
-                          <span style={{ fontSize: 11, color: "var(--primary)", background: "var(--primary-light)", padding: "2px 6px", borderRadius: 4, whiteSpace: "nowrap" }}>
-                            ✨ auto
-                          </span>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        {isProfileMapped && !isAutoMapped && (
+                          <span style={{ fontSize: 11, color: "#166534", background: "#dcfce7", padding: "2px 6px", borderRadius: 4, whiteSpace: "nowrap" }}>📋 profil</span>
+                        )}
+                        {isAutoMapped && !isProfileMapped && (
+                          <span style={{ fontSize: 11, color: "var(--primary)", background: "var(--primary-light)", padding: "2px 6px", borderRadius: 4, whiteSpace: "nowrap" }}>✨ auto</span>
                         )}
                         <select
-                          style={{ ...styles.select, minWidth: 200 }}
+                          style={{ ...styles.select, minWidth: 220 }}
                           value={mappings[header] || ""}
                           onChange={e => setMappings(m => ({ ...m, [header]: e.target.value }))}
                         >
                           <option value="">— Ignorer cette colonne —</option>
-                          {(search ? filteredFields : spacefillFields).map(f => (
-                            <option key={f.id} value={f.id}>{f.label} {f.is_required ? "*" : ""}</option>
-                          ))}
+                          <optgroup label="─── Commande ───">
+                            {filteredOrderFields.map(f => (
+                              <option key={f.id} value={f.id}>{f.label}{f.is_required ? " *" : ""}{f.is_custom ? " ◆" : ""}</option>
+                            ))}
+                          </optgroup>
+                          <optgroup label="─── Articles ───">
+                            {filteredItemFields.map(f => (
+                              <option key={f.id} value={f.id}>{f.label}{f.is_required ? " *" : ""}{f.is_custom ? " ◆" : ""}</option>
+                            ))}
+                          </optgroup>
                         </select>
                       </div>
+                    </td>
+                    <td style={{ padding: "10px 12px" }}>
+                      {section && (
+                        <span style={{ fontSize: 11, padding: "2px 8px", borderRadius: 10, background: section === "Articles" ? "#eff6ff" : "#f0fdf4", color: section === "Articles" ? "#1d4ed8" : "#166534", fontWeight: 600 }}>
+                          {section}
+                        </span>
+                      )}
                     </td>
                     <td style={{ padding: "10px 12px", textAlign: "center" }}>
                       {spacefillFields.find(f => f.id === mappings[header])?.is_required ? (
@@ -319,8 +487,8 @@ function StepMapping({ parsed, headerRowIndex, spacefillFields, onContinue, onBa
 
       <div style={styles.actions}>
         <button style={styles.btnSecondary} onClick={onBack}>← Retour</button>
-        <button style={styles.btnPrimary} onClick={() => onContinue(mappings)}>
-          Vérifier les données →
+        <button style={styles.btnPrimary} onClick={() => onContinue(mappings, { headerRowIndex: headerRow, delimiter })}>
+          Valider et envoyer →
         </button>
       </div>
     </div>
@@ -331,13 +499,41 @@ function StepMapping({ parsed, headerRowIndex, spacefillFields, onContinue, onBa
 
 const DATE_FIELDS = new Set(["delivery_date", "date", "planned_datetime_range", "created_at"]);
 const NUMBER_FIELDS = new Set(["expected_quantity", "gross_weight", "volume", "linear_meter"]);
+const INTEGER_FIELDS = new Set(["expected_quantity"]);
 const BOOL_FIELDS = new Set(["is_dangerous", "is_refrigerated"]);
+
+function parseFlexibleDate(v) {
+  if (!v) return null;
+  const s = String(v).trim().replace(/[.\-]/g, "/");
+  // dd/mm/yyyy or d/m/yyyy
+  const dmY = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (dmY) return `${dmY[3]}-${dmY[2].padStart(2, "0")}-${dmY[1].padStart(2, "0")}`;
+  // yyyy/mm/dd
+  const Ymd = s.match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})$/);
+  if (Ymd) return `${Ymd[1]}-${Ymd[2].padStart(2, "0")}-${Ymd[3].padStart(2, "0")}`;
+  // yyyymmdd compact
+  const compact = s.match(/^(\d{4})(\d{2})(\d{2})$/);
+  if (compact) return `${compact[1]}-${compact[2]}-${compact[3]}`;
+  // Already ISO
+  const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) return s.slice(0, 10);
+  // Excel serial number
+  const serial = Number(s);
+  if (!isNaN(serial) && serial > 40000 && serial < 60000) {
+    const d = new Date(Math.round((serial - 25569) * 86400 * 1000));
+    if (!isNaN(d)) return d.toISOString().slice(0, 10);
+  }
+  // Natural language fallback
+  const d = new Date(s);
+  if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+  return null;
+}
 
 function autoFormatValue(value, fieldKey) {
   if (value === null || value === undefined) return "";
   let v = String(value).trim();
 
-  // Fix Windows-1252 artifacts encoded as UTF-8 sequences
+  // Fix Windows-1252 artifacts
   v = v
     .replace(/Ã©/g, "é").replace(/Ã¨/g, "è").replace(/Ã /g, "à").replace(/Ã´/g, "ô")
     .replace(/Ã®/g, "î").replace(/Ã¹/g, "ù").replace(/Ã«/g, "ë").replace(/Ã§/g, "ç")
@@ -346,17 +542,14 @@ function autoFormatValue(value, fieldKey) {
     .replace(/â€¦/g, "…").replace(/â€"/g, "–");
 
   if (DATE_FIELDS.has(fieldKey) || fieldKey.endsWith("_date")) {
-    const dmY = v.match(/^(\d{1,2})[\/\-.:](\d{1,2})[\/\-.:](\d{4})$/);
-    if (dmY) return `${dmY[3]}-${dmY[2].padStart(2, "0")}-${dmY[1].padStart(2, "0")}`;
-    const Ymd = v.match(/^(\d{4})[\/\-.:](\d{1,2})[\/\-.:](\d{1,2})$/);
-    if (Ymd) return `${Ymd[1]}-${Ymd[2].padStart(2, "0")}-${Ymd[3].padStart(2, "0")}`;
-    const compact = v.match(/^(\d{4})(\d{2})(\d{2})$/);
-    if (compact) return `${compact[1]}-${compact[2]}-${compact[3]}`;
+    return parseFlexibleDate(v) || v;
   }
 
   if (NUMBER_FIELDS.has(fieldKey)) {
     const cleaned = v.replace(/\s/g, "").replace(/,/g, ".");
-    if (/^\d+(\.\d+)?$/.test(cleaned)) return cleaned;
+    const n = parseFloat(cleaned);
+    if (isNaN(n)) return v;
+    return INTEGER_FIELDS.has(fieldKey) ? String(Math.round(n)) : String(n);
   }
 
   if (BOOL_FIELDS.has(fieldKey)) {
@@ -370,164 +563,20 @@ function autoFormatValue(value, fieldKey) {
 
 function autoFormatRow(row) {
   const result = {};
-  for (const [key, val] of Object.entries(row)) {
-    result[key] = autoFormatValue(val, key);
-  }
+  for (const [key, val] of Object.entries(row)) result[key] = autoFormatValue(val, key);
   return result;
 }
 
-// ─── Step 4 : Preview ─────────────────────────────────────────────────────────
+// ─── Step 4 : Validation & Envoi (merged) ────────────────────────────────────
 
-function StepPreview({ formattedRows, headers, spacefillFields, onContinue, onBack }) {
-  const [showCount, setShowCount] = useState(10);
-
-  return (
-    <div style={{ maxWidth: 1000 }}>
-      <h2 style={styles.title}>Vérification des données</h2>
-      <p style={styles.subtitle}>{formattedRows.length} lignes prêtes — vérifiez avant de valider.</p>
-
-      <div style={styles.card}>
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-            <thead>
-              <tr style={{ background: "var(--bg)" }}>
-                <th style={{ ...styles.th, width: 40 }}>#</th>
-                {spacefillFields.filter(f => headers.includes(f.field_key)).map(f => (
-                  <th key={f.id} style={styles.th}>{f.label}{f.is_required ? " *" : ""}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {formattedRows.slice(0, showCount).map((row, i) => (
-                <tr key={i} style={{ borderBottom: "1px solid var(--border-light)" }}>
-                  <td style={{ padding: "8px 12px", color: "var(--ink-muted)", fontSize: 12 }}>{i + 1}</td>
-                  {spacefillFields.filter(f => headers.includes(f.field_key)).map(f => (
-                    <td key={f.id} style={{ padding: "8px 12px", maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {row[f.field_key] || <span style={{ color: "var(--ink-light)" }}>—</span>}
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        {formattedRows.length > showCount && (
-          <div style={{ textAlign: "center", padding: 12 }}>
-            <button style={styles.btnSecondary} onClick={() => setShowCount(c => c + 10)}>
-              Afficher plus ({formattedRows.length - showCount} lignes restantes)
-            </button>
-          </div>
-        )}
-      </div>
-
-      <div style={styles.actions}>
-        <button style={styles.btnSecondary} onClick={onBack}>← Retour</button>
-        <button style={styles.btnPrimary} onClick={onContinue}>
-          Valider les données →
-        </button>
-      </div>
-    </div>
-  );
-}
-
-// ─── Step 6 : Validation ──────────────────────────────────────────────────────
-
-function StepValidation({ validationResult, onContinue, onBack }) {
+function StepValidateAndSend({ formattedRows, spacefillFields, clientId, embedToken, embedWarehouseId, orderType, onLog, onResult, onBack }) {
+  const validationResult = validateRows(formattedRows, spacefillFields);
   const { valid, errored, ignored, total, errors } = validationResult;
   const blockingErrors = errors.filter(e => e.severity === "error");
   const warnings = errors.filter(e => e.severity === "warning");
 
-  function exportErrors() {
-    const csv = ["Ligne,Colonne,Champ Spacefill,Type,Message,Sévérité",
-      ...errors.map(e => `${e.row_index + 1},${e.column_name || ""},${e.spacefill_field || ""},${e.error_type},${e.error_message.replace(/,/g, ";")},${e.severity}`)
-    ].join("\n");
-    const blob = new Blob([csv], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a"); a.href = url; a.download = "rapport-erreurs.csv"; a.click();
-  }
+  const validRows = validationResult.results.filter(r => r.valid).map(r => r.row);
 
-  return (
-    <div style={{ maxWidth: 800 }}>
-      <h2 style={styles.title}>Validation des données</h2>
-
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16, marginBottom: 24 }}>
-        {[
-          { label: "Total", value: total, color: "var(--ink)" },
-          { label: "Valides", value: valid, color: "var(--primary)" },
-          { label: "Erreurs", value: errored, color: errored > 0 ? "#ef4444" : "var(--ink-muted)" },
-          { label: "Ignorées", value: ignored, color: "var(--ink-muted)" },
-        ].map(s => (
-          <div key={s.label} style={{ ...styles.card, textAlign: "center", padding: 20 }}>
-            <div style={{ fontSize: 32, fontWeight: 800, color: s.color }}>{s.value}</div>
-            <div style={{ fontSize: 13, color: "var(--ink-muted)", marginTop: 4 }}>{s.label}</div>
-          </div>
-        ))}
-      </div>
-
-      {errors.length === 0 ? (
-        <div style={{ ...styles.card, textAlign: "center", padding: 32 }}>
-          <div style={{ fontSize: 40, marginBottom: 8 }}>✅</div>
-          <p style={{ fontWeight: 700, fontSize: 16, color: "var(--primary)" }}>Toutes les données sont valides !</p>
-          <p style={{ color: "var(--ink-muted)", marginTop: 4 }}>Vous pouvez créer la commande Spacefill.</p>
-        </div>
-      ) : (
-        <div style={styles.card}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-            <span style={{ fontWeight: 700 }}>
-              {blockingErrors.length > 0 ? <span style={{ color: "#ef4444" }}>⚠ {blockingErrors.length} erreur{blockingErrors.length > 1 ? "s" : ""} bloquante{blockingErrors.length > 1 ? "s" : ""}</span> : null}
-              {warnings.length > 0 ? <span style={{ color: "#f59e0b", marginLeft: blockingErrors.length ? 12 : 0 }}>⚡ {warnings.length} avertissement{warnings.length > 1 ? "s" : ""}</span> : null}
-            </span>
-            {errors.length > 0 && <button style={styles.btnSecondary} onClick={exportErrors}>⬇ Exporter les erreurs</button>}
-          </div>
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-              <thead>
-                <tr style={{ background: "var(--bg)" }}>
-                  <th style={styles.th}>Ligne</th>
-                  <th style={styles.th}>Champ</th>
-                  <th style={styles.th}>Message</th>
-                  <th style={styles.th}>Sévérité</th>
-                </tr>
-              </thead>
-              <tbody>
-                {errors.slice(0, 50).map((e, i) => (
-                  <tr key={i} style={{ borderBottom: "1px solid var(--border-light)" }}>
-                    <td style={{ padding: "8px 12px" }}>{e.row_index + 1}</td>
-                    <td style={{ padding: "8px 12px", fontFamily: "monospace", fontSize: 12 }}>{e.spacefill_field}</td>
-                    <td style={{ padding: "8px 12px", color: "var(--ink-muted)" }}>{e.error_message}</td>
-                    <td style={{ padding: "8px 12px" }}>
-                      <span style={{ fontSize: 11, padding: "2px 8px", borderRadius: 4, background: e.severity === "error" ? "#fee2e2" : "#fef3c7", color: e.severity === "error" ? "#dc2626" : "#92400e" }}>
-                        {e.severity === "error" ? "Erreur" : "Avertissement"}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          {errors.length > 50 && <p style={{ textAlign: "center", padding: 12, color: "var(--ink-muted)", fontSize: 13 }}>… {errors.length - 50} autres erreurs dans le rapport exporté</p>}
-        </div>
-      )}
-
-      <div style={styles.actions}>
-        <button style={styles.btnSecondary} onClick={onBack}>← Retour</button>
-        {blockingErrors.length === 0 ? (
-          <button style={styles.btnPrimary} onClick={onContinue}>
-            Créer la commande Spacefill →
-          </button>
-        ) : (
-          <button style={{ ...styles.btnPrimary, background: "#ef4444" }} onClick={onContinue}>
-            Continuer malgré les erreurs ({valid} lignes valides)
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ─── Step 7 : Send to Spacefill ───────────────────────────────────────────────
-
-function StepSend({ formattedRows, clientId, importId, embedToken, embedWarehouseId, orderType, onLog, onResult, onBack }) {
   const [client, setClient] = useState(null);
   const [checking, setChecking] = useState(true);
   const [duplicates, setDuplicates] = useState([]);
@@ -536,7 +585,7 @@ function StepSend({ formattedRows, clientId, importId, embedToken, embedWarehous
   const [refsCreated, setRefsCreated] = useState(false);
   const [refErrors, setRefErrors] = useState([]);
   const [sending, setSending] = useState(false);
-  const [error, setError] = useState("");
+  const [sendError, setSendError] = useState("");
 
   const apiToken = embedToken || client?.api_token;
   const warehouseId = embedWarehouseId || client?.warehouse_id || null;
@@ -549,127 +598,118 @@ function StepSend({ formattedRows, clientId, importId, embedToken, embedWarehous
   useEffect(() => {
     const token = embedToken || client?.api_token;
     if (!token) { setChecking(false); return; }
-
-    const orderRefs = [...new Set(formattedRows.map(r => r.shipper_order_reference).filter(Boolean))];
-    const itemRefs = isEntry
-      ? [...new Set(formattedRows.map(r => r.item_reference || r.master_item_reference).filter(Boolean))]
-      : [];
-
-    const checks = [
+    const orderRefs = [...new Set(validRows.map(r => r.shipper_order_reference).filter(Boolean))];
+    const itemRefs = isEntry ? [...new Set(validRows.map(r => r.item_reference || r.master_item_reference).filter(Boolean))] : [];
+    Promise.all([
       orderRefs.length
         ? fetch("/api/check-duplicates", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ references: orderRefs, api_token: token }) }).then(r => r.json()).then(d => d.duplicates || [])
         : Promise.resolve([]),
       itemRefs.length
         ? fetch("/api/check-master-items", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ references: itemRefs, api_token: token }) }).then(r => r.json()).then(d => d.unknown || [])
         : Promise.resolve([]),
-    ];
-
-    Promise.all(checks)
-      .then(([dups, unknown]) => {
-        setDuplicates(dups);
-        setUnknownRefs(unknown);
-        setChecking(false);
-        if (dups.length > 0) onLog?.("Envoi", `${dups.length} doublon${dups.length > 1 ? "s" : ""} détecté${dups.length > 1 ? "s" : ""} : ${dups.map(d => d.reference).join(", ")}`, "error");
-        else onLog?.("Envoi", `Aucun doublon — ${orderRefs.length} référence${orderRefs.length > 1 ? "s" : ""} vérifiée${orderRefs.length > 1 ? "s" : ""}`, "success");
-        if (unknown.length > 0) onLog?.("Envoi", `${unknown.length} référence${unknown.length > 1 ? "s" : ""} article inconnue${unknown.length > 1 ? "s" : ""} : ${unknown.join(", ")}`, "warning");
-      })
-      .catch(() => setChecking(false));
+    ]).then(([dups, unknown]) => {
+      setDuplicates(dups);
+      setUnknownRefs(unknown);
+      setChecking(false);
+      if (dups.length > 0) onLog?.("Envoi", `${dups.length} doublon${dups.length > 1 ? "s" : ""} détecté${dups.length > 1 ? "s" : ""}`, "error");
+      else onLog?.("Envoi", `Aucun doublon — ${orderRefs.length} référence${orderRefs.length > 1 ? "s" : ""} vérifiée${orderRefs.length > 1 ? "s" : ""}`, "success");
+      if (unknown.length > 0) onLog?.("Envoi", `${unknown.length} référence${unknown.length > 1 ? "s" : ""} article inconnue${unknown.length > 1 ? "s" : ""}`, "warning");
+    }).catch(() => setChecking(false));
   }, [embedToken, client]);
 
   const dupRefs = new Set(duplicates.map(d => d.reference));
-  const rowsToSend = formattedRows.filter(r => !dupRefs.has(r.shipper_order_reference));
+  const rowsToSend = validRows.filter(r => !dupRefs.has(r.shipper_order_reference));
   const blocked = duplicates.length > 0 && rowsToSend.length === 0;
+
+  function exportErrors() {
+    const csv = ["Ligne,Champ Spacefill,Message,Sévérité",
+      ...errors.map(e => `${e.row_index + 1},${e.spacefill_field || ""},${e.error_message.replace(/,/g, ";")},${e.severity}`)
+    ].join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = url; a.download = "rapport-erreurs.csv"; a.click();
+  }
 
   async function createMissingRefs() {
     setCreatingRefs(true); setRefErrors([]);
     const items = unknownRefs.map(ref => {
-      const row = formattedRows.find(r => (r.item_reference || r.master_item_reference) === ref);
-      return {
-        item_reference: ref,
-        designation: row?.designation || row?.label || ref,
-        item_packaging_type: row?.item_packaging_type || "EACH",
-      };
+      const row = validRows.find(r => (r.item_reference || r.master_item_reference) === ref);
+      return { item_reference: ref, designation: row?.designation || ref, item_packaging_type: row?.item_packaging_type || "EACH" };
     });
-    const res = await fetch("/api/create-master-items", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ items, api_token: apiToken }),
-    });
+    const res = await fetch("/api/create-master-items", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ items, api_token: apiToken }) });
     const data = await res.json();
     setRefErrors(data.errors || []);
     setRefsCreated(true);
     setCreatingRefs(false);
     const created = data.created?.length || 0;
     const errs = data.errors?.length || 0;
-    onLog?.("Envoi", `${created} référence${created > 1 ? "s" : ""} article créée${created > 1 ? "s" : ""} dans Spacefill${errs ? ` — ${errs} erreur${errs > 1 ? "s" : ""}` : ""}`, errs ? "warning" : "success");
+    onLog?.("Envoi", `${created} référence${created > 1 ? "s" : ""} article créée${created > 1 ? "s" : ""}${errs ? ` — ${errs} erreur${errs > 1 ? "s" : ""}` : ""}`, errs ? "warning" : "success");
   }
 
   async function sendToSpacefill() {
-    setSending(true); setError("");
-
-    let iid = importId;
-    if (!iid) {
-      const importRes = await fetch("/api/imports", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ client_id: clientId || null, status: "processing", total_rows: rowsToSend.length }),
-      });
-      iid = (await importRes.json()).id;
-    }
-
+    setSending(true); setSendError("");
+    const importRes = await fetch("/api/imports", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ client_id: clientId || null, status: "processing", total_rows: rowsToSend.length }) });
+    const iid = (await importRes.json()).id;
     try {
-      const res = await fetch("/api/orders", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ import_id: iid, client_id: clientId, rows: rowsToSend, api_token: apiToken, order_type: orderType, warehouse_id: warehouseId }),
-      });
+      const res = await fetch("/api/orders", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ import_id: iid, client_id: clientId, rows: rowsToSend, api_token: apiToken, order_type: orderType, warehouse_id: warehouseId }) });
       const data = await res.json();
-      if (!res.ok) { setError(data.error || "Erreur lors de l'envoi."); setSending(false); return; }
+      if (!res.ok) { setSendError(data.error || "Erreur lors de l'envoi."); setSending(false); return; }
       onResult({ ...data, importId: iid, clientName: client?.name, skippedDuplicates: duplicates.length });
     } catch (err) {
-      setError("Erreur réseau : " + err.message);
+      setSendError("Erreur réseau : " + err.message);
       setSending(false);
     }
   }
 
   return (
-    <div style={{ maxWidth: 660 }}>
-      <h2 style={styles.title}>Créer les commandes Spacefill</h2>
+    <div style={{ maxWidth: 800 }}>
+      <h2 style={styles.title}>Validation & Envoi</h2>
 
-      {checking ? (
-        <div style={{ ...styles.card, display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
-          <div style={styles.spinner} />
-          <span style={{ color: "var(--ink-muted)", fontSize: 14 }}>Vérification des doublons en cours…</span>
-        </div>
-      ) : duplicates.length > 0 && (
-        <div style={{ ...styles.card, marginBottom: 16, borderColor: "#ef4444", background: "#fef2f2" }}>
-          <div style={{ display: "flex", alignItems: "flex-start", gap: 12, marginBottom: 14 }}>
-            <span style={{ fontSize: 22 }}>🚫</span>
-            <div>
-              <p style={{ fontWeight: 700, color: "#991b1b", marginBottom: 4 }}>
-                {duplicates.length} commande{duplicates.length > 1 ? "s" : ""} déjà existante{duplicates.length > 1 ? "s" : ""} dans Spacefill
-              </p>
-              <p style={{ fontSize: 13, color: "#b91c1c" }}>
-                Ces références ont déjà été créées et ne peuvent pas être recréées. Corrigez votre fichier avant de réimporter.
-              </p>
-            </div>
+      {/* Validation summary */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 20 }}>
+        {[
+          { label: "Total", value: total, color: "var(--ink)" },
+          { label: "Valides", value: valid, color: "var(--primary)" },
+          { label: "Erreurs", value: errored, color: errored > 0 ? "#ef4444" : "var(--ink-muted)" },
+          { label: "Ignorées", value: ignored, color: "var(--ink-muted)" },
+        ].map(s => (
+          <div key={s.label} style={{ ...styles.infoCard, textAlign: "center" }}>
+            <div style={{ fontSize: 28, fontWeight: 800, color: s.color }}>{s.value}</div>
+            <div style={{ fontSize: 12, color: "var(--ink-muted)", marginTop: 4 }}>{s.label}</div>
           </div>
-          <div style={{ background: "#fff", borderRadius: 8, border: "1px solid #fca5a5", maxHeight: 180, overflowY: "auto" }}>
+        ))}
+      </div>
+
+      {/* Errors list */}
+      {errors.length > 0 && (
+        <div style={{ ...styles.card, marginBottom: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+            <span style={{ fontWeight: 700, fontSize: 14 }}>
+              {blockingErrors.length > 0 && <span style={{ color: "#ef4444" }}>⚠ {blockingErrors.length} erreur{blockingErrors.length > 1 ? "s" : ""} bloquante{blockingErrors.length > 1 ? "s" : ""} </span>}
+              {warnings.length > 0 && <span style={{ color: "#f59e0b" }}>⚡ {warnings.length} avertissement{warnings.length > 1 ? "s" : ""}</span>}
+            </span>
+            <button style={{ ...styles.btnSecondary, fontSize: 12, padding: "5px 12px" }} onClick={exportErrors}>⬇ Exporter</button>
+          </div>
+          <div style={{ overflowX: "auto", maxHeight: 220, overflowY: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
               <thead>
-                <tr style={{ background: "#fef2f2" }}>
-                  <th style={{ ...styles.th, textAlign: "left" }}>Référence</th>
-                  <th style={styles.th}>ID Spacefill</th>
-                  <th style={styles.th}>Statut</th>
+                <tr style={{ background: "var(--bg)", position: "sticky", top: 0 }}>
+                  <th style={styles.th}>Ligne</th>
+                  <th style={styles.th}>Champ</th>
+                  <th style={styles.th}>Message</th>
+                  <th style={styles.th}>Sévérité</th>
                 </tr>
               </thead>
               <tbody>
-                {duplicates.map((d, i) => (
-                  <tr key={i} style={{ borderBottom: "1px solid #fee2e2" }}>
-                    <td style={{ padding: "7px 12px", fontFamily: "monospace", fontWeight: 600 }}>{d.reference}</td>
-                    <td style={{ padding: "7px 12px", textAlign: "center", fontFamily: "monospace", fontSize: 12, color: "var(--ink-muted)" }}>{d.spacefill_id || "—"}</td>
-                    <td style={{ padding: "7px 12px", textAlign: "center" }}>
-                      <span style={{ fontSize: 11, padding: "2px 7px", borderRadius: 4, background: "#dcfce7", color: "#166534" }}>{d.status || "existant"}</span>
+                {errors.slice(0, 50).map((e, i) => (
+                  <tr key={i} style={{ borderBottom: "1px solid var(--border-light)" }}>
+                    <td style={{ padding: "7px 12px" }}>{e.row_index + 1}</td>
+                    <td style={{ padding: "7px 12px", fontFamily: "monospace", fontSize: 12 }}>{e.spacefill_field}</td>
+                    <td style={{ padding: "7px 12px", color: "var(--ink-muted)" }}>{e.error_message}</td>
+                    <td style={{ padding: "7px 12px" }}>
+                      <span style={{ fontSize: 11, padding: "2px 7px", borderRadius: 4, background: e.severity === "error" ? "#fee2e2" : "#fef3c7", color: e.severity === "error" ? "#dc2626" : "#92400e" }}>
+                        {e.severity === "error" ? "Erreur" : "Avert."}
+                      </span>
                     </td>
                   </tr>
                 ))}
@@ -679,100 +719,53 @@ function StepSend({ formattedRows, clientId, importId, embedToken, embedWarehous
         </div>
       )}
 
-      {/* Unknown master items — ENTRY only */}
+      {/* Duplicate check */}
+      {checking ? (
+        <div style={{ ...styles.card, display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
+          <div style={styles.spinner} /><span style={{ color: "var(--ink-muted)", fontSize: 14 }}>Vérification des doublons…</span>
+        </div>
+      ) : duplicates.length > 0 && (
+        <div style={{ ...styles.card, marginBottom: 16, borderColor: "#ef4444", background: "#fef2f2" }}>
+          <span style={{ fontSize: 22 }}>🚫</span>
+          <strong style={{ color: "#991b1b", marginLeft: 8 }}>{duplicates.length} commande{duplicates.length > 1 ? "s" : ""} déjà existante{duplicates.length > 1 ? "s" : ""} dans Spacefill — exclue{duplicates.length > 1 ? "s" : ""} de l'envoi.</strong>
+        </div>
+      )}
+
+      {/* Unknown refs (ENTRY) */}
       {!checking && isEntry && unknownRefs.length > 0 && (
         <div style={{ ...styles.card, marginBottom: 16, borderColor: refsCreated && refErrors.length === 0 ? "#22c55e" : "#f59e0b", background: refsCreated && refErrors.length === 0 ? "#f0fdf4" : "#fffbeb" }}>
-          <div style={{ display: "flex", alignItems: "flex-start", gap: 12, marginBottom: 14 }}>
-            <span style={{ fontSize: 22 }}>{refsCreated && refErrors.length === 0 ? "✅" : "📦"}</span>
-            <div>
-              <p style={{ fontWeight: 700, color: refsCreated && refErrors.length === 0 ? "#166534" : "#92400e", marginBottom: 4 }}>
-                {refsCreated && refErrors.length === 0
-                  ? `${unknownRefs.length} référence${unknownRefs.length > 1 ? "s" : ""} créée${unknownRefs.length > 1 ? "s" : ""} dans Spacefill`
-                  : `${unknownRefs.length} référence${unknownRefs.length > 1 ? "s" : ""} inconnue${unknownRefs.length > 1 ? "s" : ""} dans Spacefill`}
-              </p>
-              <p style={{ fontSize: 13, color: refsCreated ? "#166534" : "#b45309" }}>
-                {refsCreated && refErrors.length === 0
-                  ? "Les articles ont été créés automatiquement — vous pouvez envoyer la commande."
-                  : "Ces articles n'existent pas encore. Cliquez pour les créer automatiquement avant l'envoi."}
-              </p>
-            </div>
-          </div>
-
-          <div style={{ background: "#fff", borderRadius: 8, border: `1px solid ${refsCreated && refErrors.length === 0 ? "#86efac" : "#fde68a"}`, marginBottom: refsCreated ? 0 : 14, maxHeight: 160, overflowY: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-              <tbody>
-                {unknownRefs.map((ref, i) => {
-                  const hasError = refErrors.find(e => e.item_reference === ref);
-                  return (
-                    <tr key={i} style={{ borderBottom: "1px solid var(--border-light)" }}>
-                      <td style={{ padding: "7px 12px", fontFamily: "monospace", fontWeight: 600 }}>{ref}</td>
-                      <td style={{ padding: "7px 12px", textAlign: "right", fontSize: 12 }}>
-                        {refsCreated
-                          ? hasError
-                            ? <span style={{ color: "#ef4444" }}>✗ {hasError.error}</span>
-                            : <span style={{ color: "#22c55e" }}>✓ Créée</span>
-                          : <span style={{ color: "var(--ink-muted)" }}>à créer</span>}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-
+          <p style={{ fontWeight: 700, color: refsCreated && refErrors.length === 0 ? "#166534" : "#92400e", marginBottom: 8 }}>
+            {refsCreated && refErrors.length === 0 ? `✅ ${unknownRefs.length} référence${unknownRefs.length > 1 ? "s" : ""} article créée${unknownRefs.length > 1 ? "s" : ""}` : `📦 ${unknownRefs.length} référence${unknownRefs.length > 1 ? "s" : ""} article inconnue${unknownRefs.length > 1 ? "s" : ""}`}
+          </p>
           {!refsCreated && (
-            <button
-              style={{ ...styles.btnPrimary, width: "100%", marginTop: 0, opacity: creatingRefs ? 0.7 : 1 }}
-              onClick={createMissingRefs}
-              disabled={creatingRefs}
-            >
-              {creatingRefs ? <><span style={styles.spinner} /> Création en cours…</> : `📦 Créer ${unknownRefs.length} référence${unknownRefs.length > 1 ? "s" : ""} automatiquement`}
+            <button style={{ ...styles.btnPrimary, opacity: creatingRefs ? 0.7 : 1 }} onClick={createMissingRefs} disabled={creatingRefs}>
+              {creatingRefs ? "Création en cours…" : `Créer ${unknownRefs.length} référence${unknownRefs.length > 1 ? "s" : ""} automatiquement`}
             </button>
           )}
         </div>
       )}
 
+      {/* Send block */}
       {!checking && (
         <div style={styles.card}>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14, marginBottom: 20 }}>
-            <div style={styles.infoCard}>
-              <div style={styles.infoLabel}>À envoyer</div>
-              <div style={{ ...styles.infoValue, color: rowsToSend.length > 0 ? "var(--primary)" : "var(--ink-muted)", fontSize: 24 }}>{rowsToSend.length}</div>
-            </div>
-            <div style={styles.infoCard}>
-              <div style={styles.infoLabel}>Doublons bloqués</div>
-              <div style={{ ...styles.infoValue, color: duplicates.length ? "#ef4444" : "var(--ink-muted)", fontSize: 24 }}>{duplicates.length}</div>
-            </div>
-            <div style={styles.infoCard}>
-              <div style={styles.infoLabel}>Token API</div>
-              <div style={{ ...styles.infoValue, fontSize: 14 }}>{apiToken ? "✓ Prêt" : "⚠ Manquant"}</div>
-            </div>
-          </div>
-
-          {!apiToken && (
-            <div style={{ ...styles.error, marginBottom: 16 }}>
-              ⚠ Token API manquant. Passez votre token dans l'URL : <code>?token=xxx</code>
-            </div>
-          )}
-
-          {error && <div style={styles.error}>{error}</div>}
+          {!apiToken && <div style={{ ...styles.error, marginBottom: 16 }}>⚠ Token API manquant — passez votre token dans l'URL : <code>?token=xxx</code></div>}
+          {sendError && <div style={styles.error}>{sendError}</div>}
 
           {blocked ? (
-            <div style={{ textAlign: "center", padding: "20px 0", color: "var(--ink-muted)", fontSize: 14 }}>
-              Corrigez ou retirez les doublons de votre fichier, puis recommencez l'import.
-            </div>
+            <p style={{ textAlign: "center", color: "var(--ink-muted)", fontSize: 14 }}>Corrigez les doublons dans votre fichier, puis recommencez.</p>
           ) : sending ? (
-            <div style={{ textAlign: "center", padding: 32 }}>
+            <div style={{ textAlign: "center", padding: 24 }}>
               <div style={styles.spinner} />
-              <p style={{ marginTop: 16, color: "var(--ink-muted)" }}>Envoi de {rowsToSend.length} commande{rowsToSend.length > 1 ? "s" : ""}…</p>
+              <p style={{ marginTop: 12, color: "var(--ink-muted)" }}>Envoi de {rowsToSend.length} commande{rowsToSend.length > 1 ? "s" : ""}…</p>
             </div>
           ) : (
             <button
               style={{ ...styles.btnPrimary, width: "100%", padding: 16, fontSize: 16, opacity: (!apiToken || (isEntry && unknownRefs.length > 0 && !refsCreated)) ? 0.5 : 1 }}
               onClick={sendToSpacefill}
-              disabled={!apiToken || (isEntry && unknownRefs.length > 0 && !refsCreated)}
+              disabled={!apiToken || rowsToSend.length === 0 || (isEntry && unknownRefs.length > 0 && !refsCreated)}
             >
               🚀 Envoyer {rowsToSend.length} commande{rowsToSend.length > 1 ? "s" : ""} à Spacefill
+              {blockingErrors.length > 0 && <span style={{ fontSize: 12, fontWeight: 400, marginLeft: 8, opacity: 0.8 }}>({errored} ligne{errored > 1 ? "s" : ""} en erreur exclue{errored > 1 ? "s" : ""})</span>}
             </button>
           )}
         </div>
@@ -785,7 +778,7 @@ function StepSend({ formattedRows, clientId, importId, embedToken, embedWarehous
   );
 }
 
-// ─── Step 8 : Result ──────────────────────────────────────────────────────────
+// ─── Step 5 : Result ──────────────────────────────────────────────────────────
 
 function StepResult({ result }) {
   const success = result.errors?.length === 0;
@@ -828,17 +821,6 @@ function StepResult({ result }) {
         ))}
       </div>
 
-      {result.errors?.length > 0 && (
-        <div style={{ ...styles.card, marginBottom: 20 }}>
-          <p style={{ fontWeight: 700, marginBottom: 12, color: "#ef4444" }}>Lignes en erreur</p>
-          {result.errors.slice(0, 10).map((e, i) => (
-            <div key={i} style={{ fontSize: 13, color: "var(--ink-muted)", padding: "6px 0", borderBottom: "1px solid var(--border-light)" }}>
-              {e.error}
-            </div>
-          ))}
-        </div>
-      )}
-
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
         <button style={styles.btnSecondary} onClick={exportReport}>⬇ Exporter le rapport</button>
         <Link href="/import/history" style={{ ...styles.btnSecondary, textDecoration: "none" }}>Voir l'historique</Link>
@@ -852,32 +834,27 @@ function StepResult({ result }) {
 
 const LOG_ICONS = { info: "ℹ", success: "✓", warning: "⚠", error: "✗" };
 const LOG_COLORS = {
-  info:    { bg: "var(--bg)",      text: "var(--ink-muted)", dot: "#94a3b8" },
-  success: { bg: "#f0fdf4",        text: "#166534",          dot: "#22c55e" },
-  warning: { bg: "#fffbeb",        text: "#92400e",          dot: "#f59e0b" },
-  error:   { bg: "#fef2f2",        text: "#991b1b",          dot: "#ef4444" },
+  info:    { bg: "var(--bg)",  text: "var(--ink-muted)", dot: "#94a3b8" },
+  success: { bg: "#f0fdf4",   text: "#166534",          dot: "#22c55e" },
+  warning: { bg: "#fffbeb",   text: "#92400e",          dot: "#f59e0b" },
+  error:   { bg: "#fef2f2",   text: "#991b1b",          dot: "#ef4444" },
 };
 
 function LogPanel({ logs }) {
   const [open, setOpen] = useState(false);
   if (!logs.length) return null;
-  const last = logs[logs.length - 1];
   const hasError = logs.some(l => l.type === "error");
   const hasWarning = logs.some(l => l.type === "warning");
   const summaryColor = hasError ? "#ef4444" : hasWarning ? "#f59e0b" : "#22c55e";
 
   return (
     <div style={{ marginTop: 32, border: "1px solid var(--border)", borderRadius: 12, overflow: "hidden", fontSize: 13 }}>
-      <button
-        onClick={() => setOpen(o => !o)}
-        style={{ width: "100%", display: "flex", alignItems: "center", gap: 10, padding: "12px 16px", background: "var(--bg-card)", border: "none", cursor: "pointer", textAlign: "left" }}
-      >
+      <button onClick={() => setOpen(o => !o)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 10, padding: "12px 16px", background: "var(--bg-card)", border: "none", cursor: "pointer", textAlign: "left" }}>
         <span style={{ width: 8, height: 8, borderRadius: "50%", background: summaryColor, flexShrink: 0 }} />
         <span style={{ fontWeight: 700, color: "var(--ink)", flex: 1 }}>Journal d'import</span>
         <span style={{ color: "var(--ink-muted)", fontSize: 12 }}>{logs.length} événement{logs.length > 1 ? "s" : ""}</span>
         <span style={{ color: "var(--ink-muted)", fontSize: 12, marginLeft: 8 }}>{open ? "▲" : "▼"}</span>
       </button>
-
       {open && (
         <div style={{ borderTop: "1px solid var(--border)" }}>
           {logs.map((log, i) => {
@@ -909,18 +886,17 @@ const styles = {
   infoLabel: { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.5px", color: "var(--ink-muted)", marginBottom: 4 },
   infoValue: { fontSize: 16, fontWeight: 700, color: "var(--ink)" },
   label: { display: "block", fontSize: 12, fontWeight: 700, color: "var(--ink-muted)", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 6 },
-  input: { width: "100%", padding: "9px 12px", borderRadius: 8, border: "1px solid var(--border)", fontSize: 14, color: "var(--ink)", outline: "none" },
+  input: { width: "100%", padding: "9px 12px", borderRadius: 8, border: "1px solid var(--border)", fontSize: 14, color: "var(--ink)", outline: "none", boxSizing: "border-box" },
   select: { width: "100%", padding: "9px 12px", borderRadius: 8, border: "1px solid var(--border)", fontSize: 14, color: "var(--ink)", background: "#fff", outline: "none" },
   btnPrimary: { background: "var(--primary)", color: "#fff", border: "none", borderRadius: 8, padding: "10px 20px", fontSize: 14, fontWeight: 700, cursor: "pointer" },
   btnSecondary: { background: "#fff", color: "var(--ink)", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 16px", fontSize: 14, fontWeight: 600, cursor: "pointer" },
-  btnDanger: { background: "#fee2e2", color: "#dc2626", border: "none", borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: "pointer" },
   actions: { display: "flex", gap: 12, marginTop: 24, justifyContent: "space-between" },
   error: { background: "#fee2e2", color: "#dc2626", borderRadius: 8, padding: "10px 14px", fontSize: 14, marginTop: 12 },
   spinner: { width: 32, height: 32, border: "3px solid var(--border)", borderTopColor: "var(--primary)", borderRadius: "50%", animation: "spin 0.7s linear infinite", margin: "0 auto" },
   th: { padding: "10px 12px", textAlign: "left", borderBottom: "1px solid var(--border)", fontWeight: 700, fontSize: 12, textTransform: "uppercase", letterSpacing: "0.3px", color: "var(--ink-muted)", whiteSpace: "nowrap" },
 };
 
-// ─── Main Wizard ──────────────────────────────────────────────────────────────
+// ─── Setup Screen (embed mode) ────────────────────────────────────────────────
 
 function SetupScreen({ onSave }) {
   const [customerId, setCustomerId] = useState("");
@@ -942,39 +918,14 @@ function SetupScreen({ onSave }) {
           <h1 style={{ fontSize: 22, fontWeight: 800, color: "var(--ink)", marginBottom: 8 }}>Configuration de l'accès</h1>
           <p style={{ fontSize: 14, color: "var(--ink-muted)" }}>Entrez vos identifiants une seule fois — ils seront mémorisés sur cet appareil.</p>
         </div>
-
         <div style={styles.card}>
           <label style={styles.label}>Customer ID</label>
-          <input
-            style={{ ...styles.input, marginBottom: 16 }}
-            placeholder="ex : cust_xxxxxxxx"
-            value={customerId}
-            onChange={e => setCustomerId(e.target.value)}
-          />
-
+          <input style={{ ...styles.input, marginBottom: 16 }} placeholder="ex : cust_xxxxxxxx" value={customerId} onChange={e => setCustomerId(e.target.value)} />
           <label style={styles.label}>Warehouse ID</label>
-          <input
-            style={{ ...styles.input, marginBottom: 16 }}
-            placeholder="ex : wh_xxxxxxxx"
-            value={warehouseId}
-            onChange={e => setWarehouseId(e.target.value)}
-          />
-
+          <input style={{ ...styles.input, marginBottom: 16 }} placeholder="ex : wh_xxxxxxxx" value={warehouseId} onChange={e => setWarehouseId(e.target.value)} />
           <label style={styles.label}>Token API</label>
-          <input
-            style={{ ...styles.input, marginBottom: 24, fontFamily: "monospace", fontSize: 13 }}
-            placeholder="eyJhbGciOi…"
-            type="password"
-            value={token}
-            onChange={e => setToken(e.target.value)}
-            onKeyDown={e => e.key === "Enter" && handleSave()}
-          />
-
-          <button
-            style={{ ...styles.btnPrimary, width: "100%", padding: 14, fontSize: 15, opacity: !token.trim() ? 0.5 : 1 }}
-            onClick={handleSave}
-            disabled={!token.trim()}
-          >
+          <input style={{ ...styles.input, marginBottom: 24, fontFamily: "monospace", fontSize: 13 }} placeholder="eyJhbGciOi…" type="password" value={token} onChange={e => setToken(e.target.value)} onKeyDown={e => e.key === "Enter" && handleSave()} />
+          <button style={{ ...styles.btnPrimary, width: "100%", padding: 14, fontSize: 15, opacity: !token.trim() ? 0.5 : 1 }} onClick={handleSave} disabled={!token.trim()}>
             Accéder à l'import →
           </button>
         </div>
@@ -984,20 +935,22 @@ function SetupScreen({ onSave }) {
   );
 }
 
+// ─── Main Wizard ──────────────────────────────────────────────────────────────
+
 function ImportWizardInner() {
   const searchParams = useSearchParams();
   const urlCustomerId = searchParams.get("customer_id");
   const urlToken = searchParams.get("token");
   const urlWarehouseId = searchParams.get("warehouse_id");
 
-  // All hooks must be declared before any conditional return
-  const [credentials, setCredentials] = useState(null); // null = not yet loaded
+  const [credentials, setCredentials] = useState(null);
   const [setupDone, setSetupDone] = useState(false);
   const [step, setStep] = useState(1);
   const [parsed, setParsed] = useState(null);
   const [detection, setDetection] = useState(null);
   const [spacefillFields, setSpacefillFields] = useState([]);
   const [mappings, setMappings] = useState({});
+  const [preloadedMappings, setPreloadedMappings] = useState(null);
   const [formattedRows, setFormattedRows] = useState([]);
   const [mappedFieldKeys, setMappedFieldKeys] = useState([]);
   const [validationResult, setValidationResult] = useState(null);
@@ -1012,7 +965,6 @@ function ImportWizardInner() {
   useEffect(() => {
     const saved = localStorage.getItem("spacefill_import_credentials");
     const stored = saved ? JSON.parse(saved) : {};
-    // URL params always override stored credentials
     const creds = {
       customer_id: urlCustomerId || stored.customer_id || "",
       token: urlToken || stored.token || "",
@@ -1029,8 +981,31 @@ function ImportWizardInner() {
   }, []);
 
   useEffect(() => {
-    fetch("/api/spacefill-fields").then(r => r.json()).then(d => setSpacefillFields(Array.isArray(d) ? d : []));
+    fetch("/api/spacefill-fields").then(r => r.json()).then(d => {
+      const dbFields = Array.isArray(d) ? d : [];
+      setSpacefillFields(dbFields);
+    });
   }, []);
+
+  // Load custom fields from Spacefill API when token is available
+  useEffect(() => {
+    const token = credentials?.token;
+    if (!token) return;
+    const customerId = credentials?.customer_id || "";
+    const customUrl = `/api/spacefill-custom-fields?token=${encodeURIComponent(token)}${customerId ? `&customer_id=${encodeURIComponent(customerId)}` : ""}`;
+    fetch(customUrl)
+      .then(r => r.json())
+      .then(custom => {
+        if (Array.isArray(custom) && custom.length > 0) {
+          setSpacefillFields(prev => {
+            const existingKeys = new Set(prev.map(f => f.field_key));
+            const newOnes = custom.filter(f => !existingKeys.has(f.field_key));
+            return newOnes.length > 0 ? [...prev, ...newOnes] : prev;
+          });
+        }
+      })
+      .catch(() => {});
+  }, [credentials?.token]);
 
   if (credentials === null) return null;
   if (!setupDone) {
@@ -1061,9 +1036,36 @@ function ImportWizardInner() {
     return { rows, keys };
   }
 
+  // Apply a saved profile directly (skip to validation)
+  function applyProfile(profile) {
+    if (!parsed) return;
+    const fieldKeyById = {};
+    spacefillFields.forEach(f => { fieldKeyById[f.id] = f.field_key; });
+
+    // Build mappings from profile rules: { column_name → spacefill_field_id }
+    const m = {};
+    (profile.mapping_rules || []).forEach(rule => {
+      m[rule.source_column_name] = rule.spacefill_field_id;
+    });
+
+    const det = { headerRowIndex: profile.header_row_index ?? 0, delimiter: profile.delimiter || "," };
+    setDetection(det);
+    setMappings(m);
+    setPreloadedMappings(m);
+
+    const { rows, keys } = buildFormattedRows(m, parsed, det);
+    setFormattedRows(rows);
+    setMappedFieldKeys(keys);
+
+    const result = validateRows(rows, spacefillFields);
+    setValidationResult(result);
+
+    addLog("Import", `Paramétrage "${profile.name}" appliqué — mapping en ${(profile.mapping_rules || []).length} colonnes`, "success");
+    setStep(3);
+  }
+
   return (
     <div style={{ minHeight: "100vh", background: "var(--bg)" }}>
-      {/* Top bar */}
       <div style={{ background: "var(--secondary)", padding: "14px 32px", display: "flex", alignItems: "center", gap: 16 }}>
         <Link href="/" style={{ textDecoration: "none" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -1087,72 +1089,58 @@ function ImportWizardInner() {
             onParsed={(data) => {
               setParsed(data);
               const totalRows = data.rows?.length ? data.rows.length - 1 : 0;
-              addLog("Import", `Fichier chargé : ${data.fileName} — ${totalRows} ligne${totalRows > 1 ? "s" : ""} détectée${totalRows > 1 ? "s" : ""}, encodage ${data.encoding || "UTF-8"}, type ${data.orderType}`, "success");
+              // If a profile was detected, pre-load mappings and go to mapping step (show for review)
+              if (data.detectedProfile) {
+                const profile = data.detectedProfile;
+                const det = { headerRowIndex: profile.header_row_index ?? 0, delimiter: profile.delimiter || "," };
+                const m = {};
+                (profile.mapping_rules || []).forEach(rule => { m[rule.source_column_name] = rule.spacefill_field_id; });
+                setDetection(det);
+                setPreloadedMappings(m);
+                const conf = data.detectedConfidence === "exact" ? "identique" : "similaire";
+                addLog("Import", `Fichier chargé : ${data.fileName} — paramétrage "${profile.name}" détecté (fichier ${conf})`, "success");
+              } else {
+                setDetection(null);
+                setPreloadedMappings(null);
+                addLog("Import", `Fichier chargé : ${data.fileName} — ${totalRows} ligne${totalRows > 1 ? "s" : ""}, encodage ${data.encoding || "UTF-8"}`, "success");
+              }
               setStep(2);
+            }}
+            onProfileSelected={(profile) => {
+              if (!parsed) return;
+              applyProfile(profile);
             }}
             isEmbed={isEmbed}
           />
         )}
 
         {step === 2 && parsed && (
-          <StepDetection
+          <StepDetectAndMap
             parsed={parsed}
-            onContinue={(det) => {
+            detectedProfile={parsed.detectedProfile || null}
+            detectedConfidence={parsed.detectedConfidence || null}
+            spacefillFields={spacefillFields}
+            preloadedMappings={preloadedMappings}
+            onContinue={(m, det) => {
+              setMappings(m);
               setDetection(det);
-              addLog("Détection", `En-tête ligne ${det.headerRowIndex + 1}, délimiteur « ${det.delimiter === "\t" ? "tabulation" : det.delimiter} »`, "info");
+              const { rows, keys } = buildFormattedRows(m, parsed, det);
+              setFormattedRows(rows);
+              setMappedFieldKeys(keys);
+              const mappedCount = Object.values(m).filter(Boolean).length;
+              const totalHeaders = (parsed.rows[det?.headerRowIndex ?? 0] || []).length;
+              addLog("Mapping", `${mappedCount}/${totalHeaders} colonnes mappées → ${rows.length} ligne${rows.length > 1 ? "s" : ""} préparée${rows.length > 1 ? "s" : ""}`, mappedCount < totalHeaders ? "warning" : "success");
               setStep(3);
             }}
             onBack={() => setStep(1)}
           />
         )}
 
-        {step === 3 && parsed && (
-          <StepMapping
-            parsed={parsed}
-            headerRowIndex={detection?.headerRowIndex ?? 0}
-            spacefillFields={spacefillFields}
-            onContinue={(m) => {
-              setMappings(m);
-              const { rows, keys } = buildFormattedRows(m, parsed, detection);
-              setFormattedRows(rows);
-              setMappedFieldKeys(keys);
-              const mappedCount = Object.values(m).filter(Boolean).length;
-              const totalHeaders = (parsed.rows[detection?.headerRowIndex ?? 0] || []).length;
-              addLog("Mapping", `${mappedCount}/${totalHeaders} colonnes mappées → ${rows.length} ligne${rows.length > 1 ? "s" : ""} préparée${rows.length > 1 ? "s" : ""}`, mappedCount < totalHeaders ? "warning" : "success");
-              setStep(4);
-            }}
-            onBack={() => setStep(2)}
-          />
-        )}
-
-        {step === 4 && (
-          <StepPreview
+        {step === 3 && (
+          <StepValidateAndSend
             formattedRows={formattedRows}
-            headers={mappedFieldKeys}
             spacefillFields={spacefillFields}
-            onContinue={() => {
-              const result = validateRows(formattedRows, spacefillFields);
-              setValidationResult(result);
-              addLog("Validation", `${result.valid} valide${result.valid > 1 ? "s" : ""}${result.errored ? `, ${result.errored} erreur${result.errored > 1 ? "s" : ""}` : ""}${result.ignored ? `, ${result.ignored} ignorée${result.ignored > 1 ? "s" : ""}` : ""} sur ${result.total} lignes`, result.errored > 0 ? "warning" : "success");
-              setStep(5);
-            }}
-            onBack={() => setStep(3)}
-          />
-        )}
-
-        {step === 5 && validationResult && (
-          <StepValidation
-            validationResult={validationResult}
-            onContinue={() => setStep(6)}
-            onBack={() => setStep(4)}
-          />
-        )}
-
-        {step === 6 && (
-          <StepSend
-            formattedRows={validationResult ? validationResult.results.filter(r => r.valid).map(r => r.row) : formattedRows}
             clientId={null}
-            importId={null}
             embedToken={isEmbed ? embedToken : null}
             embedWarehouseId={isEmbed ? embedWarehouseId : null}
             orderType={parsed?.orderType || "EXIT"}
@@ -1162,15 +1150,13 @@ function ImportWizardInner() {
               const err = result.errors?.length || 0;
               addLog("Envoi", `${ok} commande${ok > 1 ? "s" : ""} créée${ok > 1 ? "s" : ""}${err ? ` — ${err} erreur${err > 1 ? "s" : ""}` : ""}${result.skippedDuplicates ? ` — ${result.skippedDuplicates} doublon${result.skippedDuplicates > 1 ? "s" : ""} ignoré${result.skippedDuplicates > 1 ? "s" : ""}` : ""}`, err > 0 ? "warning" : "success");
               setSendResult(result);
-              setStep(7);
+              setStep(4);
             }}
-            onBack={() => setStep(5)}
+            onBack={() => setStep(2)}
           />
         )}
 
-        {step === 7 && sendResult && (
-          <StepResult result={sendResult} />
-        )}
+        {step === 4 && sendResult && <StepResult result={sendResult} />}
 
         <LogPanel logs={logs} />
       </div>
