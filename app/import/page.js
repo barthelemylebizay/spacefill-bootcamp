@@ -1,9 +1,10 @@
 "use client";
-import { useState, useRef, useCallback, useEffect, Suspense, Fragment } from "react";
+import { useState, useRef, useCallback, useEffect, useMemo, Suspense, Fragment } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { suggestMappings } from "@/lib/mapping-engine";
 import { validateRows } from "@/lib/validation-engine";
+import { normalizeHeader, makeFingerprint } from "@/lib/normalize-header";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -20,19 +21,16 @@ const ORDER_ITEM_FIELD_KEYS_FALLBACK = new Set([
   "batch_name", "batch_id", "batch_edi_erp_id", "batch_edi_wms_id",
 ]);
 
-function normalizeHeader(h) {
-  return String(h).trim()
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[̀-ͯ]/g, "")
-    .replace(/['’‘]/g, "")
-    .replace(/\s+/g, "_")
-    .replace(/[^a-z0-9_]/g, "");
-}
+// normalizeHeader / makeFingerprint now live in lib/normalize-header.js so the mapping
+// engine, the profile-detection route and this page all key on the exact same string.
 
-function makeFingerprint(headers) {
-  return headers.map(normalizeHeader).sort().join("|");
-}
+// Where an auto-suggestion came from — shown so the user can trust (or distrust) it.
+const SUGGESTION_BADGES = {
+  history: { label: "🧠 déjà mappé", color: "#5b21b6", bg: "#ede9fe", title: "Cette colonne a déjà été mappée sur ce champ par le passé" },
+  "history-fuzzy": { label: "🧠 similaire", color: "#5b21b6", bg: "#f5f3ff", title: "Une colonne très proche a déjà été mappée sur ce champ" },
+  values: { label: "🔍 contenu", color: "#0369a1", bg: "#e0f2fe", title: "Déduit à partir des valeurs de la colonne (emails, dates, codes postaux…)" },
+  name: { label: "✨ auto", color: "var(--primary)", bg: "var(--primary-light)", title: "Déduit à partir du nom de la colonne" },
+};
 
 // ─── Stepper bar ─────────────────────────────────────────────────────────────
 
@@ -235,26 +233,6 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
   const [previewOpen, setPreviewOpen] = useState(false);
 
   const headers = (parsed.rows[headerRow] || []).map(h => String(h).trim());
-  const [suggestions] = useState(() => suggestMappings(headers, spacefillFields, mappingHistory));
-  const [mappings, setMappings] = useState(() => {
-    if (preloadedMappings) return preloadedMappings;
-    const m = {};
-    const used = new Set();
-    suggestions.forEach(s => {
-      if (s.suggestedField && !used.has(s.suggestedField.id)) {
-        m[s.sourceColumn] = s.suggestedField.id;
-        used.add(s.suggestedField.id);
-      }
-    });
-    return m;
-  });
-  const [search, setSearch] = useState("");
-  const [saveModal, setSaveModal] = useState(false);
-  const [saveName, setSaveName] = useState("");
-  const [saveDesc, setSaveDesc] = useState("");
-  const [saveIsTemplate, setSaveIsTemplate] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [savedOk, setSavedOk] = useState(false);
 
   const isItemField = (f) => f.is_order_item_field ?? ORDER_ITEM_FIELD_KEYS_FALLBACK.has(f.field_key);
   const isEntry = orderType === "ENTRY";
@@ -266,6 +244,62 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
   };
   const orderFields = spacefillFields.filter(f => !f.is_hidden && !isItemField(f) && matchesOrderDirection(f));
   const itemFields = spacefillFields.filter(f => !f.is_hidden && isItemField(f));
+
+  // Suggestions must RECOMPUTE when the fields list or the matching history finish
+  // loading. They arrive over the network, so a one-shot useState initializer ran
+  // against empty arrays and the intelligence never applied (worse on Vercel, where
+  // the round-trip is slower than on localhost).
+  const candidateFields = useMemo(() => [...orderFields, ...itemFields], [spacefillFields, orderType]);
+  const sampleRows = useMemo(
+    () => parsed.rows.slice(headerRow + 1, headerRow + 21),
+    [parsed.rows, headerRow]
+  );
+  const suggestions = useMemo(
+    () => suggestMappings(headers, candidateFields, mappingHistory, sampleRows),
+    [headers.join(" "), candidateFields, mappingHistory, sampleRows]
+  );
+
+  const [mappings, setMappings] = useState(preloadedMappings || {});
+  // True once the user changes a dropdown — after that, never overwrite their choices.
+  const userEditedRef = useRef(false);
+
+  useEffect(() => {
+    if (userEditedRef.current) return;
+    // A saved profile always wins where it has a rule. But a profile matched by
+    // similarity (not exactly) leaves its unrecognized columns empty — so the engine
+    // fills those remaining gaps instead of leaving the user to map them by hand.
+    //
+    // Only keep profile rules whose column actually exists in THIS file: a rule for a
+    // column that was renamed still reserved its Spacefill field, which both blocked
+    // the engine from re-mapping it and inflated the "x / y colonnes mappées" counter.
+    const presentHeaders = new Set(headers);
+    const m = {};
+    for (const [col, fieldId] of Object.entries(preloadedMappings || {})) {
+      if (presentHeaders.has(col)) m[col] = fieldId;
+    }
+    const used = new Set(Object.values(m).filter(Boolean));
+    // Assign best-scoring suggestions FIRST. Each Spacefill field can only be used once,
+    // so going in column order let an early weak match (e.g. "Nom Client", scored 60)
+    // claim a field that a later, stronger match (a confirmed historical one, 95) deserved.
+    [...suggestions]
+      .filter(s => s.suggestedField)
+      .sort((a, b) => b.confidence - a.confidence)
+      .forEach(s => {
+        if (m[s.sourceColumn]) return;               // profile already decided this column
+        if (used.has(s.suggestedField.id)) return;   // field already taken by a better match
+        m[s.sourceColumn] = s.suggestedField.id;
+        used.add(s.suggestedField.id);
+      });
+    setMappings(m);
+  }, [suggestions, preloadedMappings, headers.join(" ")]);
+
+  const [search, setSearch] = useState("");
+  const [saveModal, setSaveModal] = useState(false);
+  const [saveName, setSaveName] = useState("");
+  const [saveDesc, setSaveDesc] = useState("");
+  const [saveIsTemplate, setSaveIsTemplate] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [savedOk, setSavedOk] = useState(false);
 
   function fieldSection(fieldId) {
     const field = spacefillFields.find(f => f.id === fieldId);
@@ -455,11 +489,16 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
                     <td style={{ padding: "10px 12px", color: "var(--ink-muted)", fontFamily: "monospace", fontSize: 12, maxWidth: 120, overflow: "hidden", textOverflow: "ellipsis" }}>{String(exampleVal)}</td>
                     <td style={{ padding: "10px 12px" }}>
                       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                        {isProfileMapped && !isAutoMapped && (
+                        {isProfileMapped && (
                           <span style={{ fontSize: 11, color: "#166534", background: "#dcfce7", padding: "2px 6px", borderRadius: 4, whiteSpace: "nowrap" }}>📋 profil</span>
                         )}
                         {isAutoMapped && !isProfileMapped && (
-                          <span style={{ fontSize: 11, color: "var(--primary)", background: "var(--primary-light)", padding: "2px 6px", borderRadius: 4, whiteSpace: "nowrap" }}>✨ auto</span>
+                          <span
+                            title={SUGGESTION_BADGES[suggestion.source]?.title}
+                            style={{ fontSize: 11, color: SUGGESTION_BADGES[suggestion.source]?.color || "var(--primary)", background: SUGGESTION_BADGES[suggestion.source]?.bg || "var(--primary-light)", padding: "2px 6px", borderRadius: 4, whiteSpace: "nowrap", cursor: "help" }}
+                          >
+                            {SUGGESTION_BADGES[suggestion.source]?.label || "✨ auto"}
+                          </span>
                         )}
                         <select
                           style={{ ...styles.select, minWidth: 220 }}
@@ -467,6 +506,7 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
                           onChange={e => {
                             const value = e.target.value;
                             if (value && usedElsewhere.has(value)) return;
+                            userEditedRef.current = true;
                             setMappings(m => ({ ...m, [header]: value }));
                           }}
                         >

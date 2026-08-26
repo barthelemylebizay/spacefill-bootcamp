@@ -1,19 +1,5 @@
 import supabase from "@/lib/supabase";
-
-// Normalize a header to a stable key (strips accents, apostrophes, special chars)
-function normalizeHeader(h) {
-  return String(h).trim()
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[̀-ͯ]/g, "")
-    .replace(/['’‘]/g, "")
-    .replace(/\s+/g, "_")
-    .replace(/[^a-z0-9_]/g, "");
-}
-
-function makeFingerprint(headers) {
-  return headers.map(normalizeHeader).sort().join("|");
-}
+import { normalizeHeader, makeFingerprint } from "@/lib/normalize-header";
 
 // POST — given a list of headers, find a matching profile
 export async function POST(request) {
