@@ -98,6 +98,7 @@ Tout est déjà prêt — rien à configurer.
   - **`/diagnostic-windows`** — vérification technique de préparation pour les PC Windows.
   - **`/kickoff`** — prépare, vérifie, lance et prévisualise le starter pour la personne.
   - **`/capture-bug`** — aide à décrire un problème pas à pas pour le corriger ensuite.
+- 🧠 **Un agent de fin de session** (`.claude/agents/wrap-up.md`) — à la fin d'une session, il note ce qui a été décidé et met à jour `PROJECT.md` avec l'état actuel de ton app.
 - 📋 **`AGENTS.md`** — le playbook complet que suit l'assistant pour parler en mots simples et construire vite.
 
 Tu n'as jamais besoin de toucher à tout ça.
@@ -152,11 +153,13 @@ Tu décris une idée  →  L'assistant la construit  →  Ça s'affiche  →  «
 ├── lib/
 │   └── supabase.js      # Connexion à la base de données (la mémoire de ton app)
 ├── .claude/
+│   ├── agents/          # wrap-up — note ce qui a été décidé en fin de session
 │   ├── skills/          # /givemeideas, /spacefill-ui-design, /diagnostic-*, /kickoff…
-│   └── context/         # Contexte du bootcamp (idées, cadrage, notes setup)
+│   └── context/         # Contexte du bootcamp + mémoire du projet (idées, cadrage, décisions)
 ├── public/              # Images et fichiers statiques (logo Spacefill)
 ├── .env.example         # Modèle pour tes clés Supabase (copier en .env.local)
-└── AGENTS.md            # Le playbook complet de l'assistant
+├── AGENTS.md            # Le playbook complet de l'assistant
+└── PROJECT.md           # Ce que ton app fait aujourd'hui (créé après ta première session)
 ```
 
 ---

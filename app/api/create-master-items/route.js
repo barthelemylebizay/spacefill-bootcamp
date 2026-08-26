@@ -14,7 +14,13 @@ export async function POST(request) {
     try {
       const payload = { item_reference: item.item_reference };
       if (item.designation) payload.designation = item.designation;
-      if (item.item_packaging_type) payload.each_quantity_of_each = 1; // default
+      // Give the packaging tier used by this import a unit label so the item isn't left
+      // fully unconfigured — Spacefill refuses to create orders in a packaging tier that
+      // has no data at all on the master item ("each_quantity_of_each" doesn't exist in
+      // Spacefill's schema and silently did nothing).
+      if (item.item_packaging_type === "CARDBOARD_BOX") payload.cardboard_box_unit = "CARTON";
+      else if (item.item_packaging_type === "PALLET") payload.pallet_unit = "PALETTE";
+      else payload.each_unit = "UNITE";
 
       const res = await fetch(`${SPACEFILL_API_BASE}/logistic_management/master_items/`, {
         method: "POST",

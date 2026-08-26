@@ -1,5 +1,5 @@
 "use client";
-import { useState, useRef, useCallback, useEffect, Suspense } from "react";
+import { useState, useRef, useCallback, useEffect, Suspense, Fragment } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { suggestMappings } from "@/lib/mapping-engine";
@@ -229,17 +229,23 @@ function StepImport({ onParsed, onProfileSelected, isEmbed }) {
 
 // ─── Step 2 : Detect & Map (merged) ──────────────────────────────────────────
 
-function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefillFields, preloadedMappings, onContinue, onBack }) {
+function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefillFields, preloadedMappings, mappingHistory, orderType, onContinue, onBack }) {
   const [headerRow, setHeaderRow] = useState(parsed.headerRowIndex || 0);
   const [delimiter, setDelimiter] = useState(parsed.delimiter || ",");
   const [previewOpen, setPreviewOpen] = useState(false);
 
   const headers = (parsed.rows[headerRow] || []).map(h => String(h).trim());
-  const [suggestions] = useState(() => suggestMappings(headers, spacefillFields));
+  const [suggestions] = useState(() => suggestMappings(headers, spacefillFields, mappingHistory));
   const [mappings, setMappings] = useState(() => {
     if (preloadedMappings) return preloadedMappings;
     const m = {};
-    suggestions.forEach(s => { if (s.suggestedField) m[s.sourceColumn] = s.suggestedField.id; });
+    const used = new Set();
+    suggestions.forEach(s => {
+      if (s.suggestedField && !used.has(s.suggestedField.id)) {
+        m[s.sourceColumn] = s.suggestedField.id;
+        used.add(s.suggestedField.id);
+      }
+    });
     return m;
   });
   const [search, setSearch] = useState("");
@@ -251,21 +257,28 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
   const [savedOk, setSavedOk] = useState(false);
 
   const isItemField = (f) => f.is_order_item_field ?? ORDER_ITEM_FIELD_KEYS_FALLBACK.has(f.field_key);
-  const orderFields = spacefillFields.filter(f => !isItemField(f));
-  const itemFields = spacefillFields.filter(f => isItemField(f));
+  const isEntry = orderType === "ENTRY";
+  // Réception (ENTRY) → adresse d'enlèvement chez le fournisseur ; Expédition (EXIT) → adresse de livraison au destinataire
+  const matchesOrderDirection = (f) => {
+    if (f.field_key.startsWith("pickup_")) return isEntry;
+    if (f.field_key.startsWith("delivery_")) return !isEntry;
+    return true;
+  };
+  const orderFields = spacefillFields.filter(f => !f.is_hidden && !isItemField(f) && matchesOrderDirection(f));
+  const itemFields = spacefillFields.filter(f => !f.is_hidden && isItemField(f));
 
   function fieldSection(fieldId) {
     const field = spacefillFields.find(f => f.id === fieldId);
     if (!field) return null;
-    return isItemField(field) ? "Articles" : "Commande";
+    return isItemField(field) ? "Ligne de commande" : "En-tête de commande";
   }
 
   const filteredOrderFields = orderFields.filter(f => !search || f.label.toLowerCase().includes(search.toLowerCase()) || f.field_key.toLowerCase().includes(search.toLowerCase()));
   const filteredItemFields = itemFields.filter(f => !search || f.label.toLowerCase().includes(search.toLowerCase()) || f.field_key.toLowerCase().includes(search.toLowerCase()));
 
   const mappedCount = Object.values(mappings).filter(Boolean).length;
-  const requiredCount = spacefillFields.filter(f => f.is_required).length;
-  const requiredMapped = spacefillFields.filter(f => f.is_required && Object.values(mappings).includes(f.id)).length;
+  const requiredCount = spacefillFields.filter(f => f.is_required && !f.is_hidden).length;
+  const requiredMapped = spacefillFields.filter(f => f.is_required && !f.is_hidden && Object.values(mappings).includes(f.id)).length;
 
   async function handleSave() {
     if (!saveName.trim()) return;
@@ -378,9 +391,6 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
             </>
           )}
         </div>
-        <button style={{ ...styles.btnSecondary, whiteSpace: "nowrap" }} onClick={() => setSaveModal(true)}>
-          💾 Sauvegarder ce paramétrage
-        </button>
       </div>
 
       {/* Save modal */}
@@ -434,6 +444,11 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
                 const isAutoMapped = suggestion?.confidence >= 30 && mappings[header] === suggestion?.suggestedField?.id;
                 const isProfileMapped = !!preloadedMappings?.[header];
                 const section = fieldSection(mappings[header]);
+                const usedElsewhere = new Set(
+                  Object.entries(mappings)
+                    .filter(([h, v]) => h !== header && v)
+                    .map(([, v]) => v)
+                );
                 return (
                   <tr key={i} style={{ borderBottom: "1px solid var(--border-light)" }}>
                     <td style={{ padding: "10px 12px", fontWeight: 600 }}>{header}</td>
@@ -449,17 +464,25 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
                         <select
                           style={{ ...styles.select, minWidth: 220 }}
                           value={mappings[header] || ""}
-                          onChange={e => setMappings(m => ({ ...m, [header]: e.target.value }))}
+                          onChange={e => {
+                            const value = e.target.value;
+                            if (value && usedElsewhere.has(value)) return;
+                            setMappings(m => ({ ...m, [header]: value }));
+                          }}
                         >
                           <option value="">— Ignorer cette colonne —</option>
-                          <optgroup label="─── Commande ───">
+                          <optgroup label="─── En-tête de commande ───">
                             {filteredOrderFields.map(f => (
-                              <option key={f.id} value={f.id}>{f.label}{f.is_required ? " *" : ""}{f.is_custom ? " ◆" : ""}</option>
+                              <option key={f.id} value={f.id} disabled={usedElsewhere.has(f.id)}>
+                                {f.label}{f.is_required ? " *" : ""}{f.is_custom ? " ◆" : ""}{usedElsewhere.has(f.id) ? " (déjà utilisé)" : ""}
+                              </option>
                             ))}
                           </optgroup>
-                          <optgroup label="─── Articles ───">
+                          <optgroup label="─── Ligne de commande ───">
                             {filteredItemFields.map(f => (
-                              <option key={f.id} value={f.id}>{f.label}{f.is_required ? " *" : ""}{f.is_custom ? " ◆" : ""}</option>
+                              <option key={f.id} value={f.id} disabled={usedElsewhere.has(f.id)}>
+                                {f.label}{f.is_required ? " *" : ""}{f.is_custom ? " ◆" : ""}{usedElsewhere.has(f.id) ? " (déjà utilisé)" : ""}
+                              </option>
                             ))}
                           </optgroup>
                         </select>
@@ -467,7 +490,7 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
                     </td>
                     <td style={{ padding: "10px 12px" }}>
                       {section && (
-                        <span style={{ fontSize: 11, padding: "2px 8px", borderRadius: 10, background: section === "Articles" ? "#eff6ff" : "#f0fdf4", color: section === "Articles" ? "#1d4ed8" : "#166534", fontWeight: 600 }}>
+                        <span style={{ fontSize: 11, padding: "2px 8px", borderRadius: 10, background: section === "Ligne de commande" ? "#eff6ff" : "#f0fdf4", color: section === "Ligne de commande" ? "#1d4ed8" : "#166534", fontWeight: 600 }}>
                           {section}
                         </span>
                       )}
@@ -487,6 +510,9 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
 
       <div style={styles.actions}>
         <button style={styles.btnSecondary} onClick={onBack}>← Retour</button>
+        <button style={{ ...styles.btnSecondary, whiteSpace: "nowrap" }} onClick={() => setSaveModal(true)}>
+          💾 Sauvegarder ce paramétrage
+        </button>
         <button style={styles.btnPrimary} onClick={() => onContinue(mappings, { headerRowIndex: headerRow, delimiter })}>
           Valider et envoyer →
         </button>
@@ -501,6 +527,21 @@ const DATE_FIELDS = new Set(["delivery_date", "date", "planned_datetime_range", 
 const NUMBER_FIELDS = new Set(["expected_quantity", "gross_weight", "volume", "linear_meter"]);
 const INTEGER_FIELDS = new Set(["expected_quantity"]);
 const BOOL_FIELDS = new Set(["is_dangerous", "is_refrigerated"]);
+
+// Spacefill's item_packaging_type only accepts PALLET / CARDBOARD_BOX / EACH — French
+// exports commonly use their own wording, so translate the common ones automatically
+// instead of sending an invalid enum value that gets hard-rejected by the real API.
+const PACKAGING_TYPE_SYNONYMS = {
+  "palette": "PALLET", "palettes": "PALLET", "pallet": "PALLET",
+  "carton": "CARDBOARD_BOX", "cartons": "CARDBOARD_BOX", "boite": "CARDBOARD_BOX", "boites": "CARDBOARD_BOX",
+  "boîte": "CARDBOARD_BOX", "boîtes": "CARDBOARD_BOX", "colis": "CARDBOARD_BOX", "cardboard_box": "CARDBOARD_BOX",
+  "unite": "EACH", "unités": "EACH", "unite(s)": "EACH", "unité": "EACH", "unités(s)": "EACH", "piece": "EACH", "pièce": "EACH", "each": "EACH",
+};
+
+function normalizePackagingType(v) {
+  const key = v.trim().toLowerCase();
+  return PACKAGING_TYPE_SYNONYMS[key] || v.toUpperCase();
+}
 
 function parseFlexibleDate(v) {
   if (!v) return null;
@@ -558,6 +599,10 @@ function autoFormatValue(value, fieldKey) {
     if (["non", "no", "false", "0", "n"].includes(lower)) return "false";
   }
 
+  if (fieldKey === "item_packaging_type") {
+    return normalizePackagingType(v);
+  }
+
   return v;
 }
 
@@ -574,6 +619,7 @@ function StepValidateAndSend({ formattedRows, spacefillFields, clientId, embedTo
   const { valid, errored, ignored, total, errors } = validationResult;
   const blockingErrors = errors.filter(e => e.severity === "error");
   const warnings = errors.filter(e => e.severity === "warning");
+  const [expandedRow, setExpandedRow] = useState(null);
 
   const validRows = validationResult.results.filter(r => r.valid).map(r => r.row);
 
@@ -594,6 +640,16 @@ function StepValidateAndSend({ formattedRows, spacefillFields, clientId, embedTo
   useEffect(() => {
     if (clientId) fetch(`/api/clients/${clientId}`).then(r => r.json()).then(setClient);
   }, [clientId]);
+
+  // Log a per-field breakdown so a systematic pattern (e.g. one field always empty on
+  // every other line) is easy to spot without opening each row individually.
+  useEffect(() => {
+    if (!errors.length) return;
+    const byField = {};
+    errors.forEach(e => { byField[e.spacefill_field] = (byField[e.spacefill_field] || 0) + 1; });
+    const summary = Object.entries(byField).map(([field, count]) => `${field} (${count})`).join(", ");
+    onLog?.("Validation", `${errors.length} anomalie${errors.length > 1 ? "s" : ""} détectée${errors.length > 1 ? "s" : ""} — ${summary}`, blockingErrors.length ? "warning" : "info");
+  }, []);
 
   useEffect(() => {
     const token = embedToken || client?.api_token;
@@ -696,22 +752,47 @@ function StepValidateAndSend({ formattedRows, spacefillFields, clientId, embedTo
                 <tr style={{ background: "var(--bg)", position: "sticky", top: 0 }}>
                   <th style={styles.th}>Ligne</th>
                   <th style={styles.th}>Champ</th>
+                  <th style={styles.th}>Valeur trouvée</th>
                   <th style={styles.th}>Message</th>
                   <th style={styles.th}>Sévérité</th>
+                  <th style={styles.th}></th>
                 </tr>
               </thead>
               <tbody>
                 {errors.slice(0, 50).map((e, i) => (
-                  <tr key={i} style={{ borderBottom: "1px solid var(--border-light)" }}>
-                    <td style={{ padding: "7px 12px" }}>{e.row_index + 1}</td>
-                    <td style={{ padding: "7px 12px", fontFamily: "monospace", fontSize: 12 }}>{e.spacefill_field}</td>
-                    <td style={{ padding: "7px 12px", color: "var(--ink-muted)" }}>{e.error_message}</td>
-                    <td style={{ padding: "7px 12px" }}>
-                      <span style={{ fontSize: 11, padding: "2px 7px", borderRadius: 4, background: e.severity === "error" ? "#fee2e2" : "#fef3c7", color: e.severity === "error" ? "#dc2626" : "#92400e" }}>
-                        {e.severity === "error" ? "Erreur" : "Avert."}
-                      </span>
-                    </td>
-                  </tr>
+                  <Fragment key={i}>
+                    <tr style={{ borderBottom: "1px solid var(--border-light)" }}>
+                      <td style={{ padding: "7px 12px" }}>{e.row_index + 1}</td>
+                      <td style={{ padding: "7px 12px", fontFamily: "monospace", fontSize: 12 }}>{e.spacefill_field}</td>
+                      <td style={{ padding: "7px 12px", fontFamily: "monospace", fontSize: 12, color: "var(--ink-muted)" }}>
+                        {e.raw_value === "" || e.raw_value === null || e.raw_value === undefined ? <em>(vide)</em> : `"${e.raw_value}"`}
+                      </td>
+                      <td style={{ padding: "7px 12px", color: "var(--ink-muted)" }}>{e.error_message}</td>
+                      <td style={{ padding: "7px 12px" }}>
+                        <span style={{ fontSize: 11, padding: "2px 7px", borderRadius: 4, background: e.severity === "error" ? "#fee2e2" : "#fef3c7", color: e.severity === "error" ? "#dc2626" : "#92400e" }}>
+                          {e.severity === "error" ? "Erreur" : "Avert."}
+                        </span>
+                      </td>
+                      <td style={{ padding: "7px 12px" }}>
+                        <button style={{ ...styles.btnSecondary, fontSize: 11, padding: "3px 8px" }} onClick={() => setExpandedRow(expandedRow === i ? null : i)}>
+                          {expandedRow === i ? "▲ Masquer" : "▼ Voir la ligne"}
+                        </button>
+                      </td>
+                    </tr>
+                    {expandedRow === i && (
+                      <tr>
+                        <td colSpan={6} style={{ padding: "10px 16px", background: "var(--bg)", fontFamily: "monospace", fontSize: 12 }}>
+                          <div style={{ marginBottom: 6, fontWeight: 700, color: "var(--ink-muted)" }}>Contenu complet de la ligne {e.row_index + 1} après mapping :</div>
+                          {Object.entries(e.row_snapshot || {}).map(([k, v]) => (
+                            <div key={k} style={{ display: "flex", gap: 8 }}>
+                              <span style={{ color: "var(--ink-muted)", minWidth: 260 }}>{k}</span>
+                              <span>{v === "" ? <em>(vide)</em> : String(v)}</span>
+                            </div>
+                          ))}
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
                 ))}
               </tbody>
             </table>
@@ -888,7 +969,7 @@ const styles = {
   label: { display: "block", fontSize: 12, fontWeight: 700, color: "var(--ink-muted)", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 6 },
   input: { width: "100%", padding: "9px 12px", borderRadius: 8, border: "1px solid var(--border)", fontSize: 14, color: "var(--ink)", outline: "none", boxSizing: "border-box" },
   select: { width: "100%", padding: "9px 12px", borderRadius: 8, border: "1px solid var(--border)", fontSize: 14, color: "var(--ink)", background: "#fff", outline: "none" },
-  btnPrimary: { background: "var(--primary)", color: "#fff", border: "none", borderRadius: 8, padding: "10px 20px", fontSize: 14, fontWeight: 700, cursor: "pointer" },
+  btnPrimary: { background: "var(--primary)", color: "var(--ink)", border: "none", borderRadius: 8, padding: "10px 20px", fontSize: 14, fontWeight: 700, cursor: "pointer" },
   btnSecondary: { background: "#fff", color: "var(--ink)", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 16px", fontSize: 14, fontWeight: 600, cursor: "pointer" },
   actions: { display: "flex", gap: 12, marginTop: 24, justifyContent: "space-between" },
   error: { background: "#fee2e2", color: "#dc2626", borderRadius: 8, padding: "10px 14px", fontSize: 14, marginTop: 12 },
@@ -914,7 +995,7 @@ function SetupScreen({ onSave }) {
     <div style={{ minHeight: "100vh", background: "var(--bg)", display: "flex", alignItems: "center", justifyContent: "center" }}>
       <div style={{ width: "100%", maxWidth: 480, padding: 24 }}>
         <div style={{ textAlign: "center", marginBottom: 32 }}>
-          <div style={{ width: 48, height: 48, background: "var(--primary)", borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, fontWeight: 800, color: "#fff", margin: "0 auto 16px" }}>S</div>
+          <div style={{ width: 48, height: 48, background: "var(--primary)", borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, fontWeight: 800, color: "var(--ink)", margin: "0 auto 16px" }}>S</div>
           <h1 style={{ fontSize: 22, fontWeight: 800, color: "var(--ink)", marginBottom: 8 }}>Configuration de l'accès</h1>
           <p style={{ fontSize: 14, color: "var(--ink-muted)" }}>Entrez vos identifiants une seule fois — ils seront mémorisés sur cet appareil.</p>
         </div>
@@ -949,6 +1030,7 @@ function ImportWizardInner() {
   const [parsed, setParsed] = useState(null);
   const [detection, setDetection] = useState(null);
   const [spacefillFields, setSpacefillFields] = useState([]);
+  const [mappingHistory, setMappingHistory] = useState([]);
   const [mappings, setMappings] = useState({});
   const [preloadedMappings, setPreloadedMappings] = useState(null);
   const [formattedRows, setFormattedRows] = useState([]);
@@ -984,6 +1066,9 @@ function ImportWizardInner() {
     fetch("/api/spacefill-fields").then(r => r.json()).then(d => {
       const dbFields = Array.isArray(d) ? d : [];
       setSpacefillFields(dbFields);
+    });
+    fetch("/api/mapping-history").then(r => r.json()).then(d => {
+      setMappingHistory(Array.isArray(d) ? d : []);
     });
   }, []);
 
@@ -1067,18 +1152,27 @@ function ImportWizardInner() {
   return (
     <div style={{ minHeight: "100vh", background: "var(--bg)" }}>
       <div style={{ background: "var(--secondary)", padding: "14px 32px", display: "flex", alignItems: "center", gap: 16 }}>
-        <Link href="/" style={{ textDecoration: "none" }}>
+        {isEmbed ? (
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <div style={{ width: 28, height: 28, background: "var(--primary)", borderRadius: 6, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 800, color: "#fff" }}>S</div>
+            <div style={{ width: 28, height: 28, background: "var(--primary)", borderRadius: 6, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 800, color: "var(--ink)" }}>S</div>
             <span style={{ color: "#fff", fontWeight: 700, fontSize: 14 }}>spacefill</span>
           </div>
-        </Link>
+        ) : (
+          <Link href="/" style={{ textDecoration: "none" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div style={{ width: 28, height: 28, background: "var(--primary)", borderRadius: 6, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 800, color: "var(--ink)" }}>S</div>
+              <span style={{ color: "#fff", fontWeight: 700, fontSize: 14 }}>spacefill</span>
+            </div>
+          </Link>
+        )}
         <span style={{ color: "rgba(255,255,255,0.3)", fontSize: 18 }}>/</span>
         <span style={{ color: "rgba(255,255,255,0.8)", fontWeight: 600, fontSize: 14 }}>Import commandes</span>
-        <div style={{ marginLeft: "auto", display: "flex", gap: 12 }}>
-          <Link href="/import/history" style={{ color: "rgba(255,255,255,0.65)", fontSize: 13, textDecoration: "none" }}>Historique</Link>
-          <Link href="/clients" style={{ color: "rgba(255,255,255,0.65)", fontSize: 13, textDecoration: "none" }}>Clients</Link>
-        </div>
+        {!isEmbed && (
+          <div style={{ marginLeft: "auto", display: "flex", gap: 12 }}>
+            <Link href="/import/history" style={{ color: "rgba(255,255,255,0.65)", fontSize: 13, textDecoration: "none" }}>Historique</Link>
+            <Link href="/clients" style={{ color: "rgba(255,255,255,0.65)", fontSize: 13, textDecoration: "none" }}>Clients</Link>
+          </div>
+        )}
       </div>
 
       <div style={{ maxWidth: 1060, margin: "0 auto", padding: "32px 24px" }}>
@@ -1121,6 +1215,8 @@ function ImportWizardInner() {
             detectedConfidence={parsed.detectedConfidence || null}
             spacefillFields={spacefillFields}
             preloadedMappings={preloadedMappings}
+            mappingHistory={mappingHistory}
+            orderType={parsed.orderType || "EXIT"}
             onContinue={(m, det) => {
               setMappings(m);
               setDetection(det);
@@ -1130,6 +1226,25 @@ function ImportWizardInner() {
               const mappedCount = Object.values(m).filter(Boolean).length;
               const totalHeaders = (parsed.rows[det?.headerRowIndex ?? 0] || []).length;
               addLog("Mapping", `${mappedCount}/${totalHeaders} colonnes mappées → ${rows.length} ligne${rows.length > 1 ? "s" : ""} préparée${rows.length > 1 ? "s" : ""}`, mappedCount < totalHeaders ? "warning" : "success");
+
+              // Feed the matching history so future imports detect these columns automatically
+              const fieldKeyById = {};
+              spacefillFields.forEach(f => { fieldKeyById[f.id] = f.field_key; });
+              const historyEntries = Object.entries(m)
+                .filter(([, fieldId]) => fieldId)
+                .map(([header, fieldId]) => ({
+                  header_normalized: normalizeHeader(header),
+                  header_raw: header,
+                  field_key: fieldKeyById[fieldId] || fieldId,
+                }));
+              if (historyEntries.length) {
+                fetch("/api/mapping-history", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ mappings: historyEntries }),
+                }).catch(() => {});
+              }
+
               setStep(3);
             }}
             onBack={() => setStep(1)}

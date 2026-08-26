@@ -5,7 +5,7 @@ export async function GET(request) {
   const clientId = searchParams.get("client_id");
   let query = supabase
     .from("mapping_profiles")
-    .select("*, mapping_rules(*), formatting_rules(*)")
+    .select("*, mapping_rules(*)")
     .order("created_at", { ascending: false });
   if (clientId) query = query.eq("client_id", clientId);
   const { data, error } = await query;

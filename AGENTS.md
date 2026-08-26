@@ -6,6 +6,8 @@ This repo is the starter for the **Spacefill Bootcamp**: a multi-session, hands-
 
 Stack: **Next.js 16 (App Router) + React 19**, with a hosted **Supabase (Postgres) database** for storage, deployed to **Vercel**. The user-facing rules in *Interaction rules* matter as much as the code.
 
+@.claude/context/memory.md
+
 ## Setup commands
 
 - Install dependencies: `npm install`
@@ -32,6 +34,18 @@ These live in `.claude/skills/` and Claude Code discovers them automatically. If
 - `/capture-bug`, `$capture-bug`, or when the user reports a problem without being able to explain it ("ça marche pas", "j'ai une erreur", "mon site bug", "ça plante", "page blanche"): use `.claude/skills/capture-bug/SKILL.md`.
 - `/spacefill-slides`, `$spacefill-slides`, "slides", "open the slides", or "show the slides": use `.claude/skills/spacefill-slides/SKILL.md`.
 - `/masterprompt`, `$masterprompt`, "master prompt", or "master prompt maker": use `.claude/skills/masterprompt/SKILL.md`.
+- `/teach`, `$teach`, "teach", "montre l'architecture", "explique l'architecture", or "show the architecture": use `.claude/skills/teach/SKILL.md`.
+
+## Project agents
+
+Live in `.claude/agents/`, discovered automatically:
+
+- **`wrap-up`** (`.claude/agents/wrap-up.md`) — closes out a working session. Delegate to it
+  whenever the user signals they're done for now ("on a fini", "fin de session", "on
+  reprendra plus tard", "/wrap-up"…). It logs what was decided (technical + product) into
+  `.claude/context/memory.md` and refreshes `PROJECT.md` with the app's current state. If a
+  session is clearly winding down and the user hasn't asked, offer it once in plain words —
+  e.g. *"Want me to save a summary of what we did before we stop?"*
 
 ## Interaction rules (how to talk to the user)
 

@@ -1,5 +1,5 @@
 import supabase from "@/lib/supabase";
-import { buildOrderPayload, createOrder } from "@/lib/spacefill-api";
+import { buildOrderPayload, createOrder, groupRowsByOrder } from "@/lib/spacefill-api";
 
 export async function POST(request) {
   const { import_id, client_id, rows, api_token, order_type, warehouse_id } = await request.json();
@@ -10,8 +10,12 @@ export async function POST(request) {
   const results = [];
   const errors = [];
 
-  for (const row of rows) {
-    const payload = buildOrderPayload(row);
+  // Rows sharing the same shipper_order_reference are article lines of the SAME order —
+  // group them so they become order_items on one order instead of duplicate orders.
+  const orderGroups = groupRowsByOrder(rows);
+
+  for (const group of orderGroups) {
+    const payload = buildOrderPayload(group);
     if (warehouse_id) {
       // If it looks like a UUID, use warehouse_id; otherwise use edi_erp_warehouse_id
       const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(warehouse_id);
@@ -22,7 +26,7 @@ export async function POST(request) {
       const result = await createOrder(payload, api_token, order_type);
       results.push({ success: true, spacefill_order_id: result.id || result.order_id, payload, response: result });
     } catch (err) {
-      errors.push({ row, error: err.message, payload });
+      errors.push({ row: group, error: err.message, payload });
     }
   }
 

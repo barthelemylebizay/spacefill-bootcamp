@@ -2,7 +2,7 @@ import supabase from "@/lib/supabase";
 
 export async function GET(request, { params }) {
   const { id } = await params;
-  const { data, error } = await supabase.from("mapping_profiles").select("*, mapping_rules(*, spacefill_fields(*)), formatting_rules(*)").eq("id", id).single();
+  const { data, error } = await supabase.from("mapping_profiles").select("*, mapping_rules(*, spacefill_fields(*))").eq("id", id).single();
   if (error) return Response.json({ error: error.message }, { status: 404 });
   return Response.json(data);
 }

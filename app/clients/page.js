@@ -70,7 +70,7 @@ export default function ClientsPage() {
   const S = {
     input: { width: "100%", padding: "9px 12px", borderRadius: 8, border: "1px solid var(--border)", fontSize: 14, outline: "none", boxSizing: "border-box" },
     label: { display: "block", fontSize: 12, fontWeight: 700, color: "var(--ink-muted)", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 6 },
-    btnPrimary: { background: "var(--primary)", color: "#fff", border: "none", borderRadius: 8, padding: "10px 20px", fontSize: 14, fontWeight: 700, cursor: "pointer" },
+    btnPrimary: { background: "var(--primary)", color: "var(--ink)", border: "none", borderRadius: 8, padding: "10px 20px", fontSize: 14, fontWeight: 700, cursor: "pointer" },
     btnSecondary: { background: "#fff", color: "var(--ink)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer" },
     th: { padding: "10px 14px", textAlign: "left", borderBottom: "2px solid var(--border)", fontWeight: 700, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.5px", color: "var(--ink-muted)", whiteSpace: "nowrap" },
     td: { padding: "14px", borderBottom: "1px solid var(--border-light)", fontSize: 14, verticalAlign: "middle" },
@@ -82,7 +82,7 @@ export default function ClientsPage() {
       {/* Top bar */}
       <div style={{ background: "var(--secondary)", padding: "14px 32px", display: "flex", alignItems: "center", gap: 16 }}>
         <Link href="/import" style={{ textDecoration: "none", display: "flex", alignItems: "center", gap: 8 }}>
-          <div style={{ width: 28, height: 28, background: "var(--primary)", borderRadius: 6, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 800, color: "#fff" }}>S</div>
+          <div style={{ width: 28, height: 28, background: "var(--primary)", borderRadius: 6, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 800, color: "var(--ink)" }}>S</div>
           <span style={{ color: "#fff", fontWeight: 700, fontSize: 14 }}>spacefill</span>
         </Link>
         <span style={{ color: "rgba(255,255,255,0.3)", fontSize: 18 }}>/</span>
