@@ -2,7 +2,7 @@ import supabase from "@/lib/supabase";
 import { buildOrderPayload, createOrder, groupRowsByOrder } from "@/lib/spacefill-api";
 
 export async function POST(request) {
-  const { import_id, client_id, rows, api_token, order_type, warehouse_id } = await request.json();
+  const { import_id, client_id, rows, api_token, order_type, warehouse_id, customer_id } = await request.json();
 
   if (!rows?.length) return Response.json({ error: "Aucune ligne à envoyer." }, { status: 400 });
   if (!api_token) return Response.json({ error: "Token API manquant." }, { status: 400 });
@@ -23,7 +23,7 @@ export async function POST(request) {
       else payload.edi_erp_warehouse_id = warehouse_id;
     }
     try {
-      const result = await createOrder(payload, api_token, order_type);
+      const result = await createOrder(payload, api_token, order_type, customer_id || null);
       results.push({ success: true, spacefill_order_id: result.id || result.order_id, payload, response: result });
     } catch (err) {
       errors.push({ row: group, error: err.message, payload });

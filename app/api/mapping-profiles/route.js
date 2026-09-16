@@ -1,5 +1,5 @@
 import supabase from "@/lib/supabase";
-import { resolveClientId, scopeProfilesQuery } from "@/lib/client-scope";
+import { resolveClientIds, resolveOwnerClientId, scopeProfilesQuery } from "@/lib/client-scope";
 
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
@@ -14,8 +14,8 @@ export async function GET(request) {
     .order("created_at", { ascending: false });
 
   if (!all) {
-    const clientId = explicitClientId || (await resolveClientId(customerId));
-    query = scopeProfilesQuery(query, clientId);
+    const clientIds = explicitClientId ? [explicitClientId] : await resolveClientIds(customerId);
+    query = scopeProfilesQuery(query, clientIds);
   }
 
   const { data, error } = await query;
@@ -28,7 +28,7 @@ export async function POST(request) {
   const { client_id, customer_id, name, order_type, file_type, header_row_index, delimiter, encoding, headers_fingerprint, mappings, is_template, description } = body;
 
   // Attach the profile to whoever saved it, so it stays private to them.
-  const ownerId = client_id || (await resolveClientId(customer_id));
+  const ownerId = client_id || (await resolveOwnerClientId(customer_id));
 
   const { data: profile, error } = await supabase
     .from("mapping_profiles")

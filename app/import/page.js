@@ -660,7 +660,7 @@ function autoFormatRow(row) {
 
 // ─── Step 4 : Validation & Envoi (merged) ────────────────────────────────────
 
-function StepValidateAndSend({ formattedRows, spacefillFields, clientId, embedToken, embedWarehouseId, orderType, onLog, onResult, onBack }) {
+function StepValidateAndSend({ formattedRows, spacefillFields, clientId, embedToken, embedWarehouseId, embedCustomerId, orderType, onLog, onResult, onBack }) {
   const validationResult = validateRows(formattedRows, spacefillFields);
   const { valid, errored, ignored, total, errors } = validationResult;
   const blockingErrors = errors.filter(e => e.severity === "error");
@@ -753,7 +753,7 @@ function StepValidateAndSend({ formattedRows, spacefillFields, clientId, embedTo
     const importRes = await fetch("/api/imports", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ client_id: clientId || null, status: "processing", total_rows: rowsToSend.length }) });
     const iid = (await importRes.json()).id;
     try {
-      const res = await fetch("/api/orders", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ import_id: iid, client_id: clientId, rows: rowsToSend, api_token: apiToken, order_type: orderType, warehouse_id: warehouseId }) });
+      const res = await fetch("/api/orders", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ import_id: iid, client_id: clientId, rows: rowsToSend, api_token: apiToken, order_type: orderType, warehouse_id: warehouseId, customer_id: embedCustomerId || null }) });
       const data = await res.json();
       if (!res.ok) { setSendError(data.error || "Erreur lors de l'envoi."); setSending(false); return; }
       onResult({ ...data, importId: iid, clientName: client?.name, skippedDuplicates: duplicates.length });
@@ -1025,6 +1025,65 @@ const styles = {
 
 // ─── Setup Screen (embed mode) ────────────────────────────────────────────────
 
+// Shown to a 3PL opening its link: which shipper are these orders for?
+function ClientPicker({ access, onPick }) {
+  const [search, setSearch] = useState("");
+  const list = (access.clients || []).filter(c =>
+    !search.trim() || c.name.toLowerCase().includes(search.trim().toLowerCase())
+  );
+
+  return (
+    <div style={{ minHeight: "100vh", background: "var(--bg)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div style={{ width: "100%", maxWidth: 560, padding: 24 }}>
+        <div style={{ textAlign: "center", marginBottom: 28 }}>
+          <div style={{ width: 48, height: 48, background: "var(--primary)", borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, fontWeight: 800, color: "var(--ink)", margin: "0 auto 16px" }}>S</div>
+          <h1 style={{ fontSize: 22, fontWeight: 800, color: "var(--ink)", marginBottom: 8 }}>Pour quel client ?</h1>
+          <p style={{ fontSize: 14, color: "var(--ink-muted)" }}>
+            {access.name} — choisissez le client pour lequel créer ces commandes.
+          </p>
+        </div>
+
+        <div style={styles.card}>
+          {(access.clients || []).length > 6 && (
+            <input
+              style={{ ...styles.input, marginBottom: 12 }}
+              placeholder="Rechercher un client…"
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              autoFocus
+            />
+          )}
+
+          {list.length === 0 ? (
+            <p style={{ fontSize: 14, color: "var(--ink-muted)", textAlign: "center", padding: "20px 0" }}>
+              {(access.clients || []).length === 0
+                ? "Aucun client n'est encore rattaché à cet accès."
+                : "Aucun client ne correspond à cette recherche."}
+            </p>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {list.map(c => (
+                <button
+                  key={c.id}
+                  onClick={() => onPick(c)}
+                  style={{
+                    display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12,
+                    padding: "14px 16px", border: "1px solid var(--border)", borderRadius: 10,
+                    background: "#fff", cursor: "pointer", textAlign: "left", width: "100%",
+                  }}
+                >
+                  <span style={{ fontWeight: 600, fontSize: 15 }}>{c.name}</span>
+                  <span style={{ color: "var(--primary)", fontWeight: 700 }}>→</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function SetupScreen({ onSave }) {
   const [customerId, setCustomerId] = useState("");
   const [warehouseId, setWarehouseId] = useState("");
@@ -1069,9 +1128,12 @@ function ImportWizardInner() {
   const urlCustomerId = searchParams.get("customer_id");
   const urlToken = searchParams.get("token");
   const urlWarehouseId = searchParams.get("warehouse_id");
+  const urlAccessId = searchParams.get("access");
 
   const [credentials, setCredentials] = useState(null);
   const [setupDone, setSetupDone] = useState(false);
+  const [access, setAccess] = useState(null);       // { name, type, clients[] } for an ?access= link
+  const [activeClient, setActiveClient] = useState(null); // the shipper a 3PL is working for
   const [step, setStep] = useState(1);
   const [parsed, setParsed] = useState(null);
   const [detection, setDetection] = useState(null);
@@ -1090,7 +1152,40 @@ function ImportWizardInner() {
     setLogs(l => [...l, { step: stepLabel, message, type, time }]);
   }
 
+  // Pulls one shipper's credentials (never the whole set) and switches the wizard to it.
+  const selectClient = useCallback(async (accessId, client) => {
+    const res = await fetch(`/api/accesses/${accessId}/clients/${client.id}/credentials`);
+    if (!res.ok) return;
+    const creds = await res.json();
+    setActiveClient(client);
+    setCredentials({ customer_id: creds.customer_id || "", token: creds.token || "", warehouse_id: creds.warehouse_id || "" });
+    setSetupDone(true);
+    // Restart the wizard so nothing from the previous shipper carries over.
+    setStep(1); setParsed(null); setPreloadedMappings(null); setDetection(null);
+  }, []);
+
   useEffect(() => {
+    // Access link (?access=…): credentials stay server-side until a shipper is chosen.
+    if (urlAccessId) {
+      fetch(`/api/accesses/${urlAccessId}`)
+        .then(r => r.ok ? r.json() : null)
+        .then(a => {
+          if (!a) { setCredentials({}); setSetupDone(false); return; }
+          setAccess(a);
+          // A shipper access has a single client — open it straight away. A 3PL must
+          // pick first: silently defaulting could file orders under the wrong shipper.
+          if (a.type === "SHIPPER" && a.clients?.length === 1) {
+            selectClient(a.id, a.clients[0]);
+          } else {
+            setCredentials({});
+            setSetupDone(false);
+          }
+        })
+        .catch(() => { setCredentials({}); setSetupDone(false); });
+      return;
+    }
+
+    // Legacy link carrying the credentials directly — still supported.
     const saved = localStorage.getItem("spacefill_import_credentials");
     const stored = saved ? JSON.parse(saved) : {};
     const creds = {
@@ -1106,7 +1201,7 @@ function ImportWizardInner() {
       setCredentials({});
       setSetupDone(false);
     }
-  }, []);
+  }, [urlAccessId, selectClient]);
 
   useEffect(() => {
     fetch("/api/spacefill-fields").then(r => r.json()).then(d => {
@@ -1139,6 +1234,10 @@ function ImportWizardInner() {
   }, [credentials?.token]);
 
   if (credentials === null) return null;
+  // 3PL link, no shipper chosen yet → ask which one these orders are for.
+  if (!setupDone && access) {
+    return <ClientPicker access={access} onPick={(c) => selectClient(access.id, c)} />;
+  }
   if (!setupDone) {
     return <SetupScreen onSave={(creds) => { setCredentials(creds); setSetupDone(true); }} />;
   }
@@ -1146,7 +1245,7 @@ function ImportWizardInner() {
   const embedCustomerId = credentials.customer_id || urlCustomerId || "";
   const embedToken = credentials.token || urlToken || "";
   const embedWarehouseId = credentials.warehouse_id || urlWarehouseId || "";
-  const isEmbed = !!(embedCustomerId || embedToken);
+  const isEmbed = !!(embedCustomerId || embedToken || access);
 
   function buildFormattedRows(currentMappings, currentParsed, currentDetection) {
     const headerRowIndex = currentDetection?.headerRowIndex ?? 0;
@@ -1213,6 +1312,19 @@ function ImportWizardInner() {
         )}
         <span style={{ color: "rgba(255,255,255,0.3)", fontSize: 18 }}>/</span>
         <span style={{ color: "rgba(255,255,255,0.8)", fontWeight: 600, fontSize: 14 }}>Import commandes</span>
+        {/* A 3PL works for several shippers — always show which one, and let them switch. */}
+        {access?.type === "3PL" && activeClient && (
+          <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
+            <span style={{ color: "rgba(255,255,255,0.5)", fontSize: 12 }}>Client</span>
+            <span style={{ color: "#fff", fontWeight: 700, fontSize: 13 }}>{activeClient.name}</span>
+            <button
+              onClick={() => { setActiveClient(null); setSetupDone(false); setStep(1); setParsed(null); setPreloadedMappings(null); }}
+              style={{ background: "rgba(255,255,255,0.12)", color: "#fff", border: "none", borderRadius: 6, padding: "5px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}
+            >
+              Changer
+            </button>
+          </div>
+        )}
         {!isEmbed && (
           <div style={{ marginLeft: "auto", display: "flex", gap: 12 }}>
             <Link href="/import/history" style={{ color: "rgba(255,255,255,0.65)", fontSize: 13, textDecoration: "none" }}>Historique</Link>
@@ -1306,6 +1418,7 @@ function ImportWizardInner() {
             clientId={null}
             embedToken={isEmbed ? embedToken : null}
             embedWarehouseId={isEmbed ? embedWarehouseId : null}
+            embedCustomerId={isEmbed ? embedCustomerId : null}
             orderType={parsed?.orderType || "EXIT"}
             onLog={addLog}
             onResult={(result) => {
