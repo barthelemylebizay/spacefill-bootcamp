@@ -2,7 +2,13 @@
 import { useState, useEffect } from "react";
 import Link from "next/link";
 
-const BASE_URL = typeof window !== "undefined" ? window.location.origin : "";
+// Embed links must point at the stable public address, never at the URL the admin
+// happens to be opened from: a per-deployment Vercel URL is password-protected AND
+// changes on every update, so links generated from one break as soon as we redeploy.
+// NEXT_PUBLIC_APP_URL is set on Vercel only, so local work still yields localhost links.
+const BASE_URL =
+  process.env.NEXT_PUBLIC_APP_URL ||
+  (typeof window !== "undefined" ? window.location.origin : "");
 
 function embedLink(c) {
   const params = new URLSearchParams();
