@@ -63,7 +63,7 @@ function Stepper({ current }) {
 
 // ─── Step 1 : Import ─────────────────────────────────────────────────────────
 
-function StepImport({ onParsed, onProfileSelected, isEmbed }) {
+function StepImport({ onParsed, onProfileSelected, isEmbed, customerId }) {
   const [dragging, setDragging] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -73,11 +73,16 @@ function StepImport({ onParsed, onProfileSelected, isEmbed }) {
   const inputRef = useRef();
 
   useEffect(() => {
-    fetch("/api/mapping-profiles")
+    // Scoped to this client: without customer_id the server returns only the global
+    // Spacefill templates, never another client's saved configuration.
+    const url = customerId
+      ? `/api/mapping-profiles?customer_id=${encodeURIComponent(customerId)}`
+      : "/api/mapping-profiles";
+    fetch(url)
       .then(r => r.json())
       .then(d => { setProfiles(Array.isArray(d) ? d : []); setLoadingProfiles(false); })
       .catch(() => setLoadingProfiles(false));
-  }, []);
+  }, [customerId]);
 
   async function handleFile(file) {
     if (!file) return;
@@ -96,7 +101,7 @@ function StepImport({ onParsed, onProfileSelected, isEmbed }) {
       const detectRes = await fetch("/api/mapping-profiles/detect", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ headers }),
+        body: JSON.stringify({ headers, customer_id: customerId || null }),
       });
       const detected = await detectRes.json();
       if (detected.match) {
@@ -227,7 +232,7 @@ function StepImport({ onParsed, onProfileSelected, isEmbed }) {
 
 // ─── Step 2 : Detect & Map (merged) ──────────────────────────────────────────
 
-function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefillFields, preloadedMappings, mappingHistory, orderType, onContinue, onBack }) {
+function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefillFields, preloadedMappings, mappingHistory, orderType, customerId, onContinue, onBack }) {
   const [headerRow, setHeaderRow] = useState(parsed.headerRowIndex || 0);
   const [delimiter, setDelimiter] = useState(parsed.delimiter || ",");
   const [previewOpen, setPreviewOpen] = useState(false);
@@ -329,6 +334,7 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
         headers_fingerprint: fingerprint,
         is_template: saveIsTemplate,
         mappings,
+        customer_id: customerId || null, // keeps this profile private to the client who saved it
       }),
     });
     setSaving(false);
@@ -1245,6 +1251,7 @@ function ImportWizardInner() {
               applyProfile(profile);
             }}
             isEmbed={isEmbed}
+            customerId={embedCustomerId}
           />
         )}
 
@@ -1257,6 +1264,7 @@ function ImportWizardInner() {
             preloadedMappings={preloadedMappings}
             mappingHistory={mappingHistory}
             orderType={parsed.orderType || "EXIT"}
+            customerId={embedCustomerId}
             onContinue={(m, det) => {
               setMappings(m);
               setDetection(det);

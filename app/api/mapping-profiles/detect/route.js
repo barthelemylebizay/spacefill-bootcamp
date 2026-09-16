@@ -1,17 +1,24 @@
 import supabase from "@/lib/supabase";
 import { normalizeHeader, makeFingerprint } from "@/lib/normalize-header";
+import { resolveClientId, scopeProfilesQuery } from "@/lib/client-scope";
 
 // POST — given a list of headers, find a matching profile
 export async function POST(request) {
-  const { headers } = await request.json();
+  const { headers, customer_id } = await request.json();
   if (!headers?.length) return Response.json({ match: null });
 
   const fingerprint = makeFingerprint(headers);
 
-  const { data: profiles } = await supabase
-    .from("mapping_profiles")
-    .select("*, mapping_rules(*)")
-    .not("headers_fingerprint", "is", null);
+  // Only ever match against this client's own profiles plus the global templates —
+  // otherwise one client's file could match (and reveal) another client's configuration.
+  const clientId = await resolveClientId(customer_id);
+  const { data: profiles } = await scopeProfilesQuery(
+    supabase
+      .from("mapping_profiles")
+      .select("*, mapping_rules(*)")
+      .not("headers_fingerprint", "is", null),
+    clientId
+  );
 
   if (!profiles?.length) return Response.json({ match: null });
 

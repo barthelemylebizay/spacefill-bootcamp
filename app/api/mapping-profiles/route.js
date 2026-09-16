@@ -1,13 +1,23 @@
 import supabase from "@/lib/supabase";
+import { resolveClientId, scopeProfilesQuery } from "@/lib/client-scope";
 
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
-  const clientId = searchParams.get("client_id");
+  // `customer_id` comes from the embed link; `client_id` is the admin's own view.
+  const customerId = searchParams.get("customer_id");
+  const explicitClientId = searchParams.get("client_id");
+  const all = searchParams.get("all") === "1"; // admin listing, no scoping
+
   let query = supabase
     .from("mapping_profiles")
     .select("*, mapping_rules(*)")
     .order("created_at", { ascending: false });
-  if (clientId) query = query.eq("client_id", clientId);
+
+  if (!all) {
+    const clientId = explicitClientId || (await resolveClientId(customerId));
+    query = scopeProfilesQuery(query, clientId);
+  }
+
   const { data, error } = await query;
   if (error) return Response.json({ error: error.message }, { status: 500 });
   return Response.json(data);
@@ -15,11 +25,14 @@ export async function GET(request) {
 
 export async function POST(request) {
   const body = await request.json();
-  const { client_id, name, order_type, file_type, header_row_index, delimiter, encoding, headers_fingerprint, mappings, is_template, description } = body;
+  const { client_id, customer_id, name, order_type, file_type, header_row_index, delimiter, encoding, headers_fingerprint, mappings, is_template, description } = body;
+
+  // Attach the profile to whoever saved it, so it stays private to them.
+  const ownerId = client_id || (await resolveClientId(customer_id));
 
   const { data: profile, error } = await supabase
     .from("mapping_profiles")
-    .insert({ client_id, name, order_type: order_type || "EXIT", file_type, header_row_index: header_row_index ?? 0, delimiter: delimiter || ",", encoding: encoding || "UTF-8", headers_fingerprint, is_template: !!is_template, description, template_file_url: body.template_file_url || null })
+    .insert({ client_id: ownerId, name, order_type: order_type || "EXIT", file_type, header_row_index: header_row_index ?? 0, delimiter: delimiter || ",", encoding: encoding || "UTF-8", headers_fingerprint, is_template: !!is_template, description, template_file_url: body.template_file_url || null })
     .select()
     .single();
 
