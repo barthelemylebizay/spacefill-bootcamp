@@ -305,6 +305,18 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
   const [saveIsTemplate, setSaveIsTemplate] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savedOk, setSavedOk] = useState(false);
+  const [savedProfileName, setSavedProfileName] = useState(null); // set once saved, to confirm in place
+  const [saveError, setSaveError] = useState("");
+
+  // Opens the save dialog pre-filled with the file name — one less thing to type for
+  // the common case of "remember this layout".
+  function openSaveDialog() {
+    if (!saveName.trim()) {
+      const base = String(parsed.fileName || "").replace(/\.(csv|xlsx?|xls)$/i, "").trim();
+      setSaveName(base || "");
+    }
+    setSaveModal(true);
+  }
 
   function fieldSection(fieldId) {
     const field = spacefillFields.find(f => f.id === fieldId);
@@ -323,7 +335,7 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
     if (!saveName.trim()) return;
     setSaving(true);
     const fingerprint = makeFingerprint(headers);
-    await fetch("/api/mapping-profiles", {
+    const res = await fetch("/api/mapping-profiles", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -338,7 +350,13 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
       }),
     });
     setSaving(false);
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      setSaveError(d.error || "L'enregistrement n'a pas fonctionné.");
+      return;
+    }
     setSavedOk(true);
+    setSavedProfileName(saveName.trim());
     setTimeout(() => { setSaveModal(false); setSavedOk(false); }, 1500);
   }
 
@@ -356,6 +374,34 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
             </div>
             <div style={{ fontSize: 12, color: "#166534", opacity: 0.8 }}>
               {detectedConfidence === "exact" ? "Correspondance exacte" : "Correspondance proche"} · {detectedProfile.mapping_rules?.length || 0} colonnes pré-remplies
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Never-seen file: offer to remember this layout so the next import is automatic. */}
+      {!detectedProfile && !savedProfileName && (
+        <div style={{ background: "var(--primary-light)", border: "1px solid var(--primary)", borderRadius: 10, padding: "14px 16px", marginBottom: 16, display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 20 }}>✨</span>
+          <div style={{ flex: 1, minWidth: 260 }}>
+            <div style={{ fontWeight: 700, fontSize: 14 }}>Ce format de fichier est nouveau</div>
+            <div style={{ fontSize: 13, color: "var(--ink-muted)", marginTop: 2 }}>
+              Enregistrez ce paramétrage : les prochains fichiers du même format seront remplis automatiquement.
+            </div>
+          </div>
+          <button style={{ ...styles.btnPrimary, whiteSpace: "nowrap" }} onClick={openSaveDialog}>
+            💾 Enregistrer ce paramétrage
+          </button>
+        </div>
+      )}
+
+      {savedProfileName && (
+        <div style={{ background: "#f0fdf4", border: "1px solid #86efac", borderRadius: 10, padding: "12px 16px", marginBottom: 16, display: "flex", alignItems: "center", gap: 12 }}>
+          <span style={{ fontSize: 20 }}>✅</span>
+          <div>
+            <div style={{ fontWeight: 700, color: "#166534", fontSize: 14 }}>Paramétrage « {savedProfileName} » enregistré</div>
+            <div style={{ fontSize: 12, color: "#166534", opacity: 0.8 }}>
+              Il sera proposé automatiquement au prochain fichier de ce format.
             </div>
           </div>
         </div>
@@ -450,6 +496,7 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
                   <input type="checkbox" checked={saveIsTemplate} onChange={e => setSaveIsTemplate(e.target.checked)} />
                   Marquer comme template téléchargeable par les équipes
                 </label>
+                {saveError && <p style={{ color: "#dc2626", fontSize: 13, marginBottom: 14 }}>{saveError}</p>}
                 <div style={{ display: "flex", gap: 12 }}>
                   <button style={styles.btnPrimary} onClick={handleSave} disabled={!saveName.trim() || saving}>
                     {saving ? "Sauvegarde…" : "Sauvegarder"}
@@ -556,7 +603,7 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
 
       <div style={styles.actions}>
         <button style={styles.btnSecondary} onClick={onBack}>← Retour</button>
-        <button style={{ ...styles.btnSecondary, whiteSpace: "nowrap" }} onClick={() => setSaveModal(true)}>
+        <button style={{ ...styles.btnSecondary, whiteSpace: "nowrap" }} onClick={openSaveDialog}>
           💾 Sauvegarder ce paramétrage
         </button>
         <button style={styles.btnPrimary} onClick={() => onContinue(mappings, { headerRowIndex: headerRow, delimiter })}>
