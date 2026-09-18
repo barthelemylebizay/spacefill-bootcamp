@@ -43,8 +43,10 @@ export async function POST(request) {
     api_response: { results, errors },
   }).select().single();
 
-  // Update import
+  // Update import — api_result is kept for a week alongside the raw file so a failed
+  // run can be explained after the fact.
   await supabase.from("imports").update({
+    api_result: { results, errors },
     spacefill_order_id: spacefillOrderId,
     spacefill_order_status: "created",
     status: errors.length === 0 ? "completed" : "partial",

@@ -307,14 +307,12 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
   const [savedOk, setSavedOk] = useState(false);
   const [savedProfileName, setSavedProfileName] = useState(null); // set once saved, to confirm in place
   const [saveError, setSaveError] = useState("");
+  const [hideEmpty, setHideEmpty] = useState(false);
 
-  // Opens the save dialog pre-filled with the file name — one less thing to type for
-  // the common case of "remember this layout".
+  // Deliberately NOT pre-filled from the file name: a profile is reused for months, and
+  // "Commandes ACME septembre" makes a poor name for it. The client names the format.
   function openSaveDialog() {
-    if (!saveName.trim()) {
-      const base = String(parsed.fileName || "").replace(/\.(csv|xlsx?|xls)$/i, "").trim();
-      setSaveName(base || "");
-    }
+    setSaveError("");
     setSaveModal(true);
   }
 
@@ -326,6 +324,34 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
 
   const filteredOrderFields = orderFields.filter(f => !search || f.label.toLowerCase().includes(search.toLowerCase()) || f.field_key.toLowerCase().includes(search.toLowerCase()));
   const filteredItemFields = itemFields.filter(f => !search || f.label.toLowerCase().includes(search.toLowerCase()) || f.field_key.toLowerCase().includes(search.toLowerCase()));
+
+  // Which columns actually carry data — used both to hide empty ones and to explain why
+  // a column is being ignored.
+  const columnHasData = useMemo(
+    () => headers.map((_, i) => sampleRows.some(r => String(r?.[i] ?? "").trim() !== "")),
+    [headers.join(" "), sampleRows]
+  );
+  const emptyCount = columnHasData.filter(v => !v).length;
+
+  // Structural markers from block-based exports (FR/CL/BL/DT lines): the value repeats a
+  // row-type code, never business data.
+  const TECHNICAL = /^(fr|cl|bl|dt|st)$|code identifiant|numero de ligne|type de ligne|indice/i;
+  const isTechnical = (header, i) => {
+    const vals = sampleRows.map(r => String(r?.[i] ?? "").trim()).filter(Boolean);
+    const repeatedCode = vals.length > 1 && new Set(vals).size === 1 && vals[0].length <= 3;
+    return TECHNICAL.test(header.replace(/^[A-Z]{2}\s*\|\s*/, "").trim()) || TECHNICAL.test(header) || repeatedCode;
+  };
+
+  // Why is this column left unmapped? Silence made the user re-check each one by hand.
+  function ignoreReason(header, i) {
+    if (!columnHasData[i]) return { label: "Colonne vide", tone: "muted" };
+    if (isTechnical(header, i)) return { label: "Champ technique interne", tone: "muted" };
+    const suggested = suggestions[i]?.suggestedField;
+    if (suggested && Object.values(mappings).includes(suggested.id)) {
+      return { label: "Déjà couvert par une autre colonne", tone: "muted" };
+    }
+    return { label: "Aucune correspondance — à vérifier", tone: "warn" };
+  }
 
   const mappedCount = Object.values(mappings).filter(Boolean).length;
   const requiredCount = spacefillFields.filter(f => f.is_required && !f.is_hidden).length;
@@ -489,7 +515,10 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
             ) : (
               <>
                 <label style={styles.label}>Nom du paramétrage *</label>
-                <input style={{ ...styles.input, marginBottom: 14 }} value={saveName} onChange={e => setSaveName(e.target.value)} placeholder="Ex : Format client Leroy Merlin" autoFocus />
+                <input style={{ ...styles.input, marginBottom: 4 }} value={saveName} onChange={e => setSaveName(e.target.value)} placeholder="Ex : Export hebdomadaire SAP" autoFocus />
+                <p style={{ fontSize: 12, color: "var(--ink-muted)", marginBottom: 14 }}>
+                  Nommez le <strong>format de fichier</strong>, pas cet envoi : ce nom vous sera proposé à chaque fichier de même structure.
+                </p>
                 <label style={styles.label}>Description (optionnel)</label>
                 <input style={{ ...styles.input, marginBottom: 14 }} value={saveDesc} onChange={e => setSaveDesc(e.target.value)} placeholder="Ex : Fichier export ERP SAP" />
                 <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer", marginBottom: 20, fontSize: 14 }}>
@@ -510,7 +539,11 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
       )}
 
       <div style={styles.card}>
-        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, cursor: emptyCount ? "pointer" : "default", opacity: emptyCount ? 1 : 0.45 }}>
+            <input type="checkbox" checked={hideEmpty} disabled={!emptyCount} onChange={e => setHideEmpty(e.target.checked)} />
+            Masquer les colonnes vides {emptyCount > 0 && <span style={{ color: "var(--ink-muted)" }}>({emptyCount})</span>}
+          </label>
           <input placeholder="Filtrer les champs Spacefill…" style={{ ...styles.input, maxWidth: 260, fontSize: 13 }} value={search} onChange={e => setSearch(e.target.value)} />
         </div>
         <div style={{ overflowX: "auto" }}>
@@ -526,6 +559,7 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
             </thead>
             <tbody>
               {headers.map((header, i) => {
+                if (hideEmpty && !columnHasData[i] && !mappings[header]) return null;
                 const exampleVal = (parsed.rows[headerRow + 1] || [])[i] || "";
                 const suggestion = suggestions[i];
                 const isAutoMapped = suggestion?.confidence >= 30 && mappings[header] === suggestion?.suggestedField?.id;
@@ -536,9 +570,23 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
                     .filter(([h, v]) => h !== header && v)
                     .map(([, v]) => v)
                 );
+                // The order reference is what groups several file lines into one order —
+                // worth pointing out, since getting it wrong silently splits or merges orders.
+                const isOrderRef = spacefillFields.find(f => f.id === mappings[header])?.field_key === "shipper_order_reference";
+                const reason = mappings[header] ? null : ignoreReason(header, i);
                 return (
-                  <tr key={i} style={{ borderBottom: "1px solid var(--border-light)" }}>
-                    <td style={{ padding: "10px 12px", fontWeight: 600 }}>{header}</td>
+                  <tr key={i} style={{
+                    borderBottom: "1px solid var(--border-light)",
+                    background: isOrderRef ? "var(--primary-light)" : undefined,
+                  }}>
+                    <td style={{ padding: "10px 12px", fontWeight: 600, opacity: !columnHasData[i] && !mappings[header] ? 0.55 : 1 }}>
+                      {header}
+                      {isOrderRef && (
+                        <div style={{ fontSize: 11, fontWeight: 700, color: "var(--primary-dark)", marginTop: 3 }}>
+                          🔑 regroupe les lignes en commandes
+                        </div>
+                      )}
+                    </td>
                     <td style={{ padding: "10px 12px", color: "var(--ink-muted)", fontFamily: "monospace", fontSize: 12, maxWidth: 120, overflow: "hidden", textOverflow: "ellipsis" }}>{String(exampleVal)}</td>
                     <td style={{ padding: "10px 12px" }}>
                       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -579,6 +627,16 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
                             ))}
                           </optgroup>
                         </select>
+                        {reason && (
+                          <span style={{
+                            fontSize: 11, whiteSpace: "nowrap", padding: "2px 8px", borderRadius: 4,
+                            background: reason.tone === "warn" ? "#fef3c7" : "var(--bg)",
+                            color: reason.tone === "warn" ? "#92400e" : "var(--ink-muted)",
+                            border: reason.tone === "warn" ? "1px solid #fde68a" : "1px solid var(--border)",
+                          }}>
+                            {reason.tone === "warn" ? "⚠ " : ""}{reason.label}
+                          </span>
+                        )}
                       </div>
                     </td>
                     <td style={{ padding: "10px 12px" }}>
@@ -707,7 +765,9 @@ function autoFormatRow(row) {
 
 // ─── Step 4 : Validation & Envoi (merged) ────────────────────────────────────
 
-function StepValidateAndSend({ formattedRows, spacefillFields, clientId, embedToken, embedWarehouseId, embedCustomerId, orderType, onLog, onResult, onBack }) {
+function StepValidateAndSend({ formattedRows, spacefillFields, clientId, embedToken, embedWarehouseId, embedCustomerId, orderType, sourceFile, importLogs, onLog, onResult, onBack }) {
+  // Changes to the mapping upstream must invalidate the Spacefill checks below.
+  const rowsSignature = useMemo(() => JSON.stringify(formattedRows), [formattedRows]);
   const validationResult = validateRows(formattedRows, spacefillFields);
   const { valid, errored, ignored, total, errors } = validationResult;
   const blockingErrors = errors.filter(e => e.severity === "error");
@@ -747,6 +807,8 @@ function StepValidateAndSend({ formattedRows, spacefillFields, clientId, embedTo
   useEffect(() => {
     const token = embedToken || client?.api_token;
     if (!token) { setChecking(false); return; }
+    // Clear the previous mapping's findings before re-checking.
+    setChecking(true); setDuplicates([]); setUnknownRefs([]); setRefsCreated(false); setRefErrors([]);
     const orderRefs = [...new Set(validRows.map(r => r.shipper_order_reference).filter(Boolean))];
     const itemRefs = isEntry ? [...new Set(validRows.map(r => r.item_reference || r.master_item_reference).filter(Boolean))] : [];
     Promise.all([
@@ -764,11 +826,19 @@ function StepValidateAndSend({ formattedRows, spacefillFields, clientId, embedTo
       else onLog?.("Envoi", `Aucun doublon — ${orderRefs.length} référence${orderRefs.length > 1 ? "s" : ""} vérifiée${orderRefs.length > 1 ? "s" : ""}`, "success");
       if (unknown.length > 0) onLog?.("Envoi", `${unknown.length} référence${unknown.length > 1 ? "s" : ""} article inconnue${unknown.length > 1 ? "s" : ""}`, "warning");
     }).catch(() => setChecking(false));
-  }, [embedToken, client]);
+    // Re-run whenever the mapping changed upstream: going back a step, remapping a column
+    // and returning otherwise kept showing the duplicates found for the PREVIOUS mapping.
+  }, [embedToken, client, rowsSignature]);
 
   const dupRefs = new Set(duplicates.map(d => d.reference));
   const rowsToSend = validRows.filter(r => !dupRefs.has(r.shipper_order_reference));
   const blocked = duplicates.length > 0 && rowsToSend.length === 0;
+
+  // A file line is an order LINE. Lines sharing a reference are one order with several
+  // articles — which is how they are sent, so that is what must be counted here.
+  const countOrders = (rows) => new Set(rows.map((r, i) => r.shipper_order_reference || `__ligne_${i}__`)).size;
+  const ordersToSend = countOrders(rowsToSend);
+  const ordersTotal = countOrders(formattedRows);
 
   function exportErrors() {
     const csv = ["Ligne,Champ Spacefill,Message,Sévérité",
@@ -797,7 +867,20 @@ function StepValidateAndSend({ formattedRows, spacefillFields, clientId, embedTo
 
   async function sendToSpacefill() {
     setSending(true); setSendError("");
-    const importRes = await fetch("/api/imports", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ client_id: clientId || null, status: "processing", total_rows: rowsToSend.length }) });
+    const importRes = await fetch("/api/imports", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        client_id: clientId || null,
+        status: "processing",
+        total_rows: rowsToSend.length,
+        file_name: sourceFile?.fileName || null,
+        // Raw file + run log, purged after a week (see app/api/imports/route.js).
+        raw_file: sourceFile?.rawFile || null,
+        raw_file_encoding: sourceFile?.rawFile ? "base64" : null,
+        logs: importLogs || null,
+      }),
+    });
     const iid = (await importRes.json()).id;
     try {
       const res = await fetch("/api/orders", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ import_id: iid, client_id: clientId, rows: rowsToSend, api_token: apiToken, order_type: orderType, warehouse_id: warehouseId, customer_id: embedCustomerId || null }) });
@@ -817,10 +900,10 @@ function StepValidateAndSend({ formattedRows, spacefillFields, clientId, embedTo
       {/* Validation summary */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 20 }}>
         {[
-          { label: "Total", value: total, color: "var(--ink)" },
-          { label: "Valides", value: valid, color: "var(--primary)" },
-          { label: "Erreurs", value: errored, color: errored > 0 ? "#ef4444" : "var(--ink-muted)" },
-          { label: "Ignorées", value: ignored, color: "var(--ink-muted)" },
+          { label: ordersTotal > 1 ? "Commandes" : "Commande", value: ordersTotal, color: "var(--ink)" },
+          { label: "Lignes du fichier", value: total, color: "var(--ink-muted)" },
+          { label: "Lignes valides", value: valid, color: "var(--primary)" },
+          { label: "Lignes en erreur", value: errored, color: errored > 0 ? "#ef4444" : "var(--ink-muted)" },
         ].map(s => (
           <div key={s.label} style={{ ...styles.infoCard, textAlign: "center" }}>
             <div style={{ fontSize: 28, fontWeight: 800, color: s.color }}>{s.value}</div>
@@ -938,8 +1021,11 @@ function StepValidateAndSend({ formattedRows, spacefillFields, clientId, embedTo
               onClick={sendToSpacefill}
               disabled={!apiToken || rowsToSend.length === 0 || (isEntry && unknownRefs.length > 0 && !refsCreated)}
             >
-              🚀 Envoyer {rowsToSend.length} commande{rowsToSend.length > 1 ? "s" : ""} à Spacefill
-              {blockingErrors.length > 0 && <span style={{ fontSize: 12, fontWeight: 400, marginLeft: 8, opacity: 0.8 }}>({errored} ligne{errored > 1 ? "s" : ""} en erreur exclue{errored > 1 ? "s" : ""})</span>}
+              🚀 Envoyer {ordersToSend} commande{ordersToSend > 1 ? "s" : ""} à Spacefill
+              <span style={{ fontSize: 12, fontWeight: 400, marginLeft: 8, opacity: 0.8 }}>
+                ({rowsToSend.length} ligne{rowsToSend.length > 1 ? "s" : ""}
+                {blockingErrors.length > 0 ? ` — ${errored} en erreur exclue${errored > 1 ? "s" : ""}` : ""})
+              </span>
             </button>
           )}
         </div>
@@ -1466,6 +1552,8 @@ function ImportWizardInner() {
             embedToken={isEmbed ? embedToken : null}
             embedWarehouseId={isEmbed ? embedWarehouseId : null}
             embedCustomerId={isEmbed ? embedCustomerId : null}
+            sourceFile={parsed}
+            importLogs={logs}
             orderType={parsed?.orderType || "EXIT"}
             onLog={addLog}
             onResult={(result) => {

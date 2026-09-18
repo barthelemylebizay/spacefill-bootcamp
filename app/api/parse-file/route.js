@@ -14,6 +14,9 @@ export async function POST(request) {
       preview,
       fileName: file.name,
       fileSize: file.size,
+      // Kept with the import for a week so a failed run can be replayed against the exact
+      // bytes that were uploaded. Skipped for large files to stay out of row-size trouble.
+      rawFile: file.size <= 2_000_000 ? Buffer.from(buffer).toString("base64") : null,
     });
   } catch (err) {
     return Response.json({ error: err.message }, { status: 400 });

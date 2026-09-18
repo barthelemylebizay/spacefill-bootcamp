@@ -10,9 +10,21 @@ export async function GET(request) {
   return Response.json(data);
 }
 
+const RETENTION_DAYS = 7;
+
 export async function POST(request) {
   const body = await request.json();
-  const { data, error } = await supabase.from("imports").insert(body).select().single();
+
+  // Drop the payloads of imports older than the retention window. Doing it on write
+  // avoids needing a scheduler, and keeps client order data from lingering.
+  supabase.rpc("purge_expired_import_payloads").then(() => {}, () => {});
+
+  const purgeAfter = new Date(Date.now() + RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  const { data, error } = await supabase
+    .from("imports")
+    .insert({ ...body, purge_after: purgeAfter })
+    .select()
+    .single();
   if (error) return Response.json({ error: error.message }, { status: 500 });
   return Response.json(data);
 }
