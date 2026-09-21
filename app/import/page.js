@@ -24,6 +24,22 @@ const ORDER_ITEM_FIELD_KEYS_FALLBACK = new Set([
 // normalizeHeader / makeFingerprint now live in lib/normalize-header.js so the mapping
 // engine, the profile-detection route and this page all key on the exact same string.
 
+// An explicit "ignore" is stored as this sentinel rather than as an empty value, so the
+// screen can tell a deliberate choice from a column nobody has looked at yet. Both end up
+// out of the payload — only the wording differs.
+const IGNORED = "__ignorer__";
+const isMappedToField = (v) => Boolean(v) && v !== IGNORED;
+
+// What each column of the mapping table means. Used both for the header tooltips and
+// the "how to read this table" panel, so the two can never drift apart.
+const COLONNES_TABLEAU = [
+  { titre: "Colonne fichier", aide: "L'en-tête de la colonne, tel qu'il est écrit dans votre fichier." },
+  { titre: "Exemple", aide: "La valeur de cette colonne sur la première ligne de votre fichier, pour vous aider à la reconnaître." },
+  { titre: "Champ Spacefill", aide: "Le champ Spacefill dans lequel cette colonne sera envoyée. Laissez « À mapper » pour ne pas l'envoyer." },
+  { titre: "Catégorie", aide: "En-tête de commande : l'information concerne la commande entière (destinataire, date, référence). Ligne de commande : elle concerne un produit précis de la commande (article, quantité, lot), et se répète donc autant de fois qu'il y a de produits." },
+  { titre: "Requis", aide: "Un ✓ signale un champ obligatoire : sans lui, Spacefill refusera la commande." },
+];
+
 // One short explanation per step: what is about to happen and why it matters.
 const STEP_INTRO = {
   1: "Déposez votre fichier de commandes. Son format est reconnu automatiquement s'il a déjà été importé ; sinon vous pourrez l'enregistrer pour les prochaines fois.",
@@ -409,7 +425,7 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
     return { label: "Aucune correspondance — à vérifier", tone: "warn" };
   }
 
-  const mappedCount = Object.values(mappings).filter(Boolean).length;
+  const mappedCount = Object.values(mappings).filter(isMappedToField).length;
   const requiredCount = spacefillFields.filter(f => f.is_required && !f.is_hidden).length;
   const requiredMapped = spacefillFields.filter(f => f.is_required && !f.is_hidden && Object.values(mappings).includes(f.id)).length;
 
@@ -603,19 +619,37 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
           </label>
           <input placeholder="Filtrer les champs Spacefill…" style={{ ...styles.input, maxWidth: 260, fontSize: 13 }} value={search} onChange={e => setSearch(e.target.value)} />
         </div>
+
+        {/* Available on demand rather than always on screen: useful the first few times,
+            noise once the user knows the table. */}
+        <details style={{ marginBottom: 12 }}>
+          <summary style={{ cursor: "pointer", fontSize: 13, fontWeight: 600, color: "var(--primary-dark)" }}>
+            ⓘ Comment lire ce tableau ?
+          </summary>
+          <div style={{ marginTop: 10, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "12px 16px" }}>
+            {COLONNES_TABLEAU.map(c => (
+              <p key={c.titre} style={{ fontSize: 13, color: "var(--ink-muted)", lineHeight: 1.55, marginBottom: 8 }}>
+                <strong style={{ color: "var(--ink)" }}>{c.titre}</strong> — {c.aide}
+              </p>
+            ))}
+            <p style={{ fontSize: 13, color: "var(--ink-muted)", lineHeight: 1.55, margin: 0 }}>
+              Une colonne laissée sur <strong>« À mapper »</strong> n'est pas envoyée à Spacefill. Le motif affiché à côté
+              indique pourquoi elle ne l'est pas encore — seuls les motifs en orange demandent votre attention.
+            </p>
+          </div>
+        </details>
+
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
             <thead>
               <tr style={{ background: "var(--bg)" }}>
-                <th style={styles.th}>Colonne fichier</th>
-                <th style={styles.th}>Exemple</th>
-                <th style={styles.th}>Champ Spacefill</th>
-                <th style={styles.th}>
-                  <span title="En-tête de commande : une seule valeur par commande (destinataire, date, référence…). Ligne de commande : se répète pour chaque produit (article, quantité, lot…)." style={{ cursor: "help", borderBottom: "1px dotted var(--ink-muted)" }}>
-                    Catégorie ⓘ
-                  </span>
-                </th>
-                <th style={styles.th}>Requis</th>
+                {COLONNES_TABLEAU.map(c => (
+                  <th key={c.titre} style={styles.th}>
+                    <span title={c.aide} style={{ cursor: "help", borderBottom: "1px dotted var(--ink-muted)" }}>
+                      {c.titre} ⓘ
+                    </span>
+                  </th>
+                ))}
               </tr>
             </thead>
             <tbody>
@@ -628,13 +662,15 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
                 const section = fieldSection(mappings[header]);
                 const usedElsewhere = new Set(
                   Object.entries(mappings)
-                    .filter(([h, v]) => h !== header && v)
+                    .filter(([h, v]) => h !== header && isMappedToField(v))
                     .map(([, v]) => v)
                 );
                 // The order reference is what groups several file lines into one order —
                 // worth pointing out, since getting it wrong silently splits or merges orders.
                 const isOrderRef = spacefillFields.find(f => f.id === mappings[header])?.field_key === "shipper_order_reference";
-                const reason = mappings[header] ? null : ignoreReason(header, i);
+                const reason = mappings[header] === IGNORED
+                  ? { label: "Ignorée volontairement", tone: "muted" }
+                  : mappings[header] ? null : ignoreReason(header, i);
                 return (
                   <tr key={i} style={{
                     borderBottom: "1px solid var(--border-light)",
@@ -672,7 +708,10 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
                             setMappings(m => ({ ...m, [header]: value }));
                           }}
                         >
-                          <option value="">— Ignorer cette colonne —</option>
+                          {/* Untouched column = a decision still to make; "Ignorer" is the
+                              same outcome, chosen on purpose. */}
+                          <option value="">— À associer —</option>
+                          <option value={IGNORED}>Ignorer cette colonne</option>
                           <optgroup label="─── En-tête de commande ───">
                             {filteredOrderFields.map(f => (
                               <option key={f.id} value={f.id} disabled={usedElsewhere.has(f.id)}>
@@ -1558,7 +1597,7 @@ function ImportWizardInner() {
     const rows = dataRows.map(row => {
       const mapped = {};
       headers.forEach((h, i) => {
-        if (currentMappings[h]) mapped[fieldKeyById[currentMappings[h]]] = String(row[i] ?? "");
+        if (isMappedToField(currentMappings[h])) mapped[fieldKeyById[currentMappings[h]]] = String(row[i] ?? "");
       });
       return autoFormatRow(mapped);
     });
@@ -1692,7 +1731,7 @@ function ImportWizardInner() {
               const fieldKeyById = {};
               spacefillFields.forEach(f => { fieldKeyById[f.id] = f.field_key; });
               const historyEntries = Object.entries(m)
-                .filter(([, fieldId]) => fieldId)
+                .filter(([, fieldId]) => isMappedToField(fieldId))
                 .map(([header, fieldId]) => ({
                   header_normalized: normalizeHeader(header),
                   header_raw: header,

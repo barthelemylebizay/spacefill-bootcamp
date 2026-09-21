@@ -41,7 +41,9 @@ export async function POST(request) {
   // Save mapping rules
   if (mappings && Object.keys(mappings).length > 0) {
     const rules = Object.entries(mappings)
-      .filter(([, fieldId]) => fieldId)
+      // "__ignorer__" is a deliberate non-mapping, not a field id — inserting it would
+      // break the foreign key to spacefill_fields.
+      .filter(([, fieldId]) => fieldId && fieldId !== "__ignorer__")
       .map(([col, fieldId]) => ({
         mapping_profile_id: profile.id,
         source_column_name: col,
