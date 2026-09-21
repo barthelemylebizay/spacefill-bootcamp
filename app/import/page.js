@@ -939,6 +939,26 @@ function StepValidateAndSend({ formattedRows, spacefillFields, clientId, embedTo
 
   async function sendToSpacefill() {
     setSending(true); setSendError("");
+
+    // A token valid when the access was created can be revoked or rotated later. Check
+    // once here, so an expired one reads as one clear sentence instead of an
+    // "Unauthorized" repeated on every single line of the report.
+    try {
+      const check = await fetch("/api/verify-token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tokens: [apiToken] }),
+      });
+      const { results } = await check.json();
+      if (results?.[apiToken] === false) {
+        setSendError("Le token Spacefill de ce client est refusé (401) — il a probablement été régénéré ou révoqué. Mettez-le à jour dans l'espace admin, puis relancez l'envoi. Aucune commande n'a été créée.");
+        setSending(false);
+        return;
+      }
+    } catch {
+      // Verification unreachable — carry on rather than block a legitimate send.
+    }
+
     const importRes = await fetch("/api/imports", {
       method: "POST",
       headers: { "Content-Type": "application/json" },

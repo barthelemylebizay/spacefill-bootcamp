@@ -45,8 +45,10 @@ export default function AccessesPage() {
     setForm({
       name: a.name,
       type: a.type,
+      // Carry the id so the server updates these rows instead of recreating them —
+      // recreating changes their id and cascades away their saved mapping profiles.
       clients: (a.clients || []).length
-        ? a.clients.map(c => ({ name: c.name || "", customer_id: c.customer_id || "", warehouse_id: c.warehouse_id || "", api_token: c.api_token || "" }))
+        ? a.clients.map(c => ({ id: c.id, name: c.name || "", customer_id: c.customer_id || "", warehouse_id: c.warehouse_id || "", api_token: c.api_token || "" }))
         : [emptyClient()],
     });
     setShowForm(true);
