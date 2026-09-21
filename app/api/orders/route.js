@@ -1,8 +1,9 @@
 import supabase from "@/lib/supabase";
 import { buildOrderPayload, createOrder, groupRowsByOrder } from "@/lib/spacefill-api";
+import { notifyImportFinished } from "@/lib/slack";
 
 export async function POST(request) {
-  const { import_id, client_id, rows, api_token, order_type, warehouse_id, customer_id } = await request.json();
+  const { import_id, client_id, rows, api_token, order_type, warehouse_id, customer_id, file_name: fileName } = await request.json();
 
   if (!rows?.length) return Response.json({ error: "Aucune ligne à envoyer." }, { status: 400 });
   if (!api_token) return Response.json({ error: "Token API manquant." }, { status: 400 });
@@ -54,6 +55,24 @@ export async function POST(request) {
     error_rows: errors.length,
     updated_at: new Date().toISOString(),
   }).eq("id", import_id);
+
+  // Tell the team the run finished. Awaited so the serverless function isn't torn down
+  // mid-request, but never allowed to fail the response.
+  try {
+    const { data: cli } = customer_id
+      ? await supabase.from("clients").select("name, accesses(name)").eq("customer_id", customer_id).limit(1).maybeSingle()
+      : { data: null };
+    await notifyImportFinished({
+      clientName: cli?.name,
+      accessName: cli?.accesses?.name,
+      fileName: fileName || null,
+      created: results.length,
+      errors,
+      appUrl: process.env.NEXT_PUBLIC_APP_URL,
+    });
+  } catch {
+    // Notification is best-effort; the import already happened.
+  }
 
   return Response.json({ order, results, errors, spacefill_order_id: spacefillOrderId });
 }

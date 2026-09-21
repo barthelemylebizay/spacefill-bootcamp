@@ -388,10 +388,20 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
     return TECHNICAL.test(header.replace(/^[A-Z]{2}\s*\|\s*/, "").trim()) || TECHNICAL.test(header) || repeatedCode;
   };
 
+  // Columns a French logistics file commonly carries that Spacefill has no field for.
+  // Naming them keeps a legitimate column out of the "to check" pile.
+  const NO_EQUIVALENT = [
+    { test: /(telephone|tel|num)\s*(fixe|bureau|standard)|fixe\b/i, label: "Téléphone fixe — pas de champ Spacefill" },
+    { test: /\bfax\b/i, label: "Fax — pas de champ Spacefill" },
+    { test: /\btva\b|\bsiret\b|\bsiren\b/i, label: "Donnée administrative — pas de champ Spacefill" },
+  ];
+
   // Why is this column left unmapped? Silence made the user re-check each one by hand.
   function ignoreReason(header, i) {
     if (!columnHasData[i]) return { label: "Colonne vide", tone: "muted" };
     if (isTechnical(header, i)) return { label: "Champ technique interne", tone: "muted" };
+    const known = NO_EQUIVALENT.find(n => n.test.test(header));
+    if (known) return { label: known.label, tone: "muted" };
     const suggested = suggestions[i]?.suggestedField;
     if (suggested && Object.values(mappings).includes(suggested.id)) {
       return { label: "Déjà couvert par une autre colonne", tone: "muted" };
@@ -975,7 +985,7 @@ function StepValidateAndSend({ formattedRows, spacefillFields, clientId, embedTo
     });
     const iid = (await importRes.json()).id;
     try {
-      const res = await fetch("/api/orders", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ import_id: iid, client_id: clientId, rows: rowsToSend, api_token: apiToken, order_type: orderType, warehouse_id: warehouseId, customer_id: embedCustomerId || null }) });
+      const res = await fetch("/api/orders", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ import_id: iid, client_id: clientId, rows: rowsToSend, api_token: apiToken, order_type: orderType, warehouse_id: warehouseId, customer_id: embedCustomerId || null, file_name: sourceFile?.fileName || null }) });
       const data = await res.json();
       if (!res.ok) { setSendError(data.error || "Erreur lors de l'envoi."); setSending(false); return; }
       onResult({ ...data, importId: iid, clientName: client?.name, skippedDuplicates: duplicates.length });
@@ -1427,7 +1437,12 @@ function ImportWizardInner() {
   const [step, setStep] = useState(1);
   const [parsed, setParsed] = useState(null);
   const [detection, setDetection] = useState(null);
-  const [spacefillFields, setSpacefillFields] = useState([]);
+  // Catalogue fields and the client's own custom fields are kept apart: custom fields
+  // belong to ONE shipper, and a 3PL switching shipper must not inherit the previous
+  // one's (they all share a token, so watching the token alone never noticed the switch).
+  const [dbFields, setDbFields] = useState([]);
+  const [customFields, setCustomFields] = useState([]);
+  const spacefillFields = useMemo(() => [...dbFields, ...customFields], [dbFields, customFields]);
   const [mappingHistory, setMappingHistory] = useState([]);
   const [mappings, setMappings] = useState({});
   const [preloadedMappings, setPreloadedMappings] = useState(null);
@@ -1495,33 +1510,29 @@ function ImportWizardInner() {
 
   useEffect(() => {
     fetch("/api/spacefill-fields").then(r => r.json()).then(d => {
-      const dbFields = Array.isArray(d) ? d : [];
-      setSpacefillFields(dbFields);
+      setDbFields(Array.isArray(d) ? d : []);
     });
     fetch("/api/mapping-history").then(r => r.json()).then(d => {
       setMappingHistory(Array.isArray(d) ? d : []);
     });
   }, []);
 
-  // Load custom fields from Spacefill API when token is available
+  // Custom fields the client created in Spacefill, read from its existing orders, so
+  // they can be mapped like any other field. Reloaded whenever the shipper changes —
+  // and REPLACED, never accumulated, so one shipper's fields never show up for another.
   useEffect(() => {
     const token = credentials?.token;
-    if (!token) return;
     const customerId = credentials?.customer_id || "";
-    const customUrl = `/api/spacefill-custom-fields?token=${encodeURIComponent(token)}${customerId ? `&customer_id=${encodeURIComponent(customerId)}` : ""}`;
-    fetch(customUrl)
+    if (!token) { setCustomFields([]); return; }
+    let cancelled = false;
+    const url = `/api/spacefill-custom-fields?token=${encodeURIComponent(token)}${customerId ? `&customer_id=${encodeURIComponent(customerId)}` : ""}`;
+    setCustomFields([]);
+    fetch(url)
       .then(r => r.json())
-      .then(custom => {
-        if (Array.isArray(custom) && custom.length > 0) {
-          setSpacefillFields(prev => {
-            const existingKeys = new Set(prev.map(f => f.field_key));
-            const newOnes = custom.filter(f => !existingKeys.has(f.field_key));
-            return newOnes.length > 0 ? [...prev, ...newOnes] : prev;
-          });
-        }
-      })
-      .catch(() => {});
-  }, [credentials?.token]);
+      .then(custom => { if (!cancelled) setCustomFields(Array.isArray(custom) ? custom : []); })
+      .catch(() => { if (!cancelled) setCustomFields([]); });
+    return () => { cancelled = true; };
+  }, [credentials?.token, credentials?.customer_id]);
 
   if (credentials === null) return null;
   // 3PL link, no shipper chosen yet → ask which one these orders are for.
