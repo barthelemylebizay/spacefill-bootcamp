@@ -24,6 +24,36 @@ const ORDER_ITEM_FIELD_KEYS_FALLBACK = new Set([
 // normalizeHeader / makeFingerprint now live in lib/normalize-header.js so the mapping
 // engine, the profile-detection route and this page all key on the exact same string.
 
+// One short explanation per step: what is about to happen and why it matters.
+const STEP_INTRO = {
+  1: "Déposez votre fichier de commandes. Son format est reconnu automatiquement s'il a déjà été importé ; sinon vous pourrez l'enregistrer pour les prochaines fois.",
+  2: "Chaque colonne de votre fichier est associée à un champ Spacefill. Les champs « En-tête de commande » ne valent qu'une fois par commande ; les champs « Ligne de commande » se répètent pour chaque produit — c'est pourquoi plusieurs lignes de votre fichier peuvent former une seule commande.",
+  3: "Dernière vérification avant envoi : les erreurs sont regroupées par cause, et les commandes déjà présentes dans Spacefill sont écartées pour éviter les doublons.",
+  4: "Voici ce qui a été créé dans Spacefill. Le fichier et le détail de cet envoi restent consultables une semaine.",
+};
+
+function StepIntro({ step }) {
+  const text = STEP_INTRO[step];
+  if (!text) return null;
+  return (
+    <p style={{
+      fontSize: 13, color: "var(--ink-muted)", lineHeight: 1.55,
+      background: "var(--bg)", border: "1px solid var(--border)",
+      borderRadius: 8, padding: "10px 14px", marginBottom: 16,
+    }}>
+      {text}
+    </p>
+  );
+}
+
+// Actionable hint per error type — "doit être une date valide" alone doesn't say what to fix.
+const ERROR_HINTS = {
+  INVALID_DATE: "Formats acceptés : JJ/MM/AAAA, AAAA-MM-JJ ou AAAAMMJJ. Une heure à la suite est tolérée (ex : 30/11/2025 16:28).",
+  INVALID_TYPE: "Cette colonne doit contenir un nombre (les espaces et la virgule décimale sont acceptés).",
+  REQUIRED: "Associez une colonne de votre fichier à ce champ à l'étape Mapping.",
+  INVALID_VALUE: "La valeur doit faire partie de la liste attendue par Spacefill.",
+};
+
 // Where an auto-suggestion came from — shown so the user can trust (or distrust) it.
 const SUGGESTION_BADGES = {
   history: { label: "🧠 déjà mappé", color: "#5b21b6", bg: "#ede9fe", title: "Cette colonne a déjà été mappée sur ce champ par le passé" },
@@ -124,6 +154,7 @@ function StepImport({ onParsed, onProfileSelected, isEmbed, customerId }) {
         Convertissez un fichier CSV ou Excel en commande Spacefill en quelques étapes.
         {isEmbed && <span style={{ marginLeft: 8, fontSize: 12, background: "var(--primary-light)", color: "var(--primary)", padding: "2px 8px", borderRadius: 4, fontWeight: 700 }}>Accès client</span>}
       </p>
+      <StepIntro step={1} />
 
       <div style={styles.card}>
         <label style={styles.label}>Type de commande</label>
@@ -389,6 +420,7 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
   return (
     <div style={{ maxWidth: 960 }}>
       <h2 style={styles.title}>Mapping des colonnes</h2>
+      <StepIntro step={2} />
 
       {/* Auto-detected profile banner */}
       {detectedProfile && (
@@ -553,7 +585,11 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
                 <th style={styles.th}>Colonne fichier</th>
                 <th style={styles.th}>Exemple</th>
                 <th style={styles.th}>Champ Spacefill</th>
-                <th style={styles.th}>Catégorie</th>
+                <th style={styles.th}>
+                  <span title="En-tête de commande : une seule valeur par commande (destinataire, date, référence…). Ligne de commande : se répète pour chaque produit (article, quantité, lot…)." style={{ cursor: "help", borderBottom: "1px dotted var(--ink-muted)" }}>
+                    Catégorie ⓘ
+                  </span>
+                </th>
                 <th style={styles.th}>Requis</th>
               </tr>
             </thead>
@@ -696,7 +732,10 @@ function normalizePackagingType(v) {
 
 function parseFlexibleDate(v) {
   if (!v) return null;
-  const s = String(v).trim().replace(/[.\-]/g, "/");
+  // Exports very often carry a time ("30/11/2025 16:28", "2025-11-30T09:06:00"). Spacefill
+  // wants a day, so drop the time part before matching instead of failing the whole row.
+  const withoutTime = String(v).trim().replace(/[T\s]+\d{1,2}[:h]\d{2}(:\d{2})?(\.\d+)?\s*(Z|[+-]\d{2}:?\d{2})?$/i, "");
+  const s = withoutTime.trim().replace(/[.\-]/g, "/");
   // dd/mm/yyyy or d/m/yyyy
   const dmY = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
   if (dmY) return `${dmY[3]}-${dmY[2].padStart(2, "0")}-${dmY[1].padStart(2, "0")}`;
@@ -706,9 +745,9 @@ function parseFlexibleDate(v) {
   // yyyymmdd compact
   const compact = s.match(/^(\d{4})(\d{2})(\d{2})$/);
   if (compact) return `${compact[1]}-${compact[2]}-${compact[3]}`;
-  // Already ISO
-  const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (iso) return s.slice(0, 10);
+  // Already ISO (the "/" swap above turns "2025-11-30" into "2025/11/30", so check both)
+  const iso = withoutTime.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) return withoutTime.slice(0, 10);
   // Excel serial number
   const serial = Number(s);
   if (!isNaN(serial) && serial > 40000 && serial < 60000) {
@@ -840,6 +879,24 @@ function StepValidateAndSend({ formattedRows, spacefillFields, clientId, embedTo
   const ordersToSend = countOrders(rowsToSend);
   const ordersTotal = countOrders(formattedRows);
 
+  // One bad date format produced one error line per row — 19 identical rows to read
+  // through. Group by cause instead, and say how many lines and orders each one blocks.
+  const errorCauses = useMemo(() => {
+    const byCause = new Map();
+    for (const e of errors) {
+      const key = `${e.error_type}|${e.spacefill_field}`;
+      if (!byCause.has(key)) {
+        byCause.set(key, { ...e, rows: [], samples: new Set(), orders: new Set() });
+      }
+      const c = byCause.get(key);
+      c.rows.push(e.row_index);
+      if (e.raw_value) c.samples.add(String(e.raw_value));
+      const ref = formattedRows[e.row_index]?.shipper_order_reference;
+      c.orders.add(ref || `__ligne_${e.row_index}__`);
+    }
+    return [...byCause.values()].sort((a, b) => b.rows.length - a.rows.length);
+  }, [errors, formattedRows]);
+
   function exportErrors() {
     const csv = ["Ligne,Champ Spacefill,Message,Sévérité",
       ...errors.map(e => `${e.row_index + 1},${e.spacefill_field || ""},${e.error_message.replace(/,/g, ";")},${e.severity}`)
@@ -896,6 +953,7 @@ function StepValidateAndSend({ formattedRows, spacefillFields, clientId, embedTo
   return (
     <div style={{ maxWidth: 800 }}>
       <h2 style={styles.title}>Validation & Envoi</h2>
+      <StepIntro step={3} />
 
       {/* Validation summary */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 20 }}>
@@ -922,6 +980,36 @@ function StepValidateAndSend({ formattedRows, spacefillFields, clientId, embedTo
             </span>
             <button style={{ ...styles.btnSecondary, fontSize: 12, padding: "5px 12px" }} onClick={exportErrors}>⬇ Exporter</button>
           </div>
+
+          {/* Causes first: one wrong date format is one problem to fix, not N identical rows. */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
+            {errorCauses.map((c, i) => {
+              const nbOrders = c.orders.size;
+              const hint = ERROR_HINTS[c.error_type];
+              return (
+                <div key={i} style={{
+                  border: `1px solid ${c.severity === "error" ? "#fecaca" : "#fde68a"}`,
+                  background: c.severity === "error" ? "#fef2f2" : "#fffbeb",
+                  borderRadius: 8, padding: "10px 14px",
+                }}>
+                  <div style={{ fontWeight: 700, fontSize: 13, color: c.severity === "error" ? "#991b1b" : "#92400e" }}>
+                    {c.error_message.replace(/\s*\(valeur[^)]*\)/, "")}
+                  </div>
+                  <div style={{ fontSize: 12, color: "var(--ink-muted)", marginTop: 3 }}>
+                    Affecte <strong>{c.rows.length} ligne{c.rows.length > 1 ? "s" : ""}</strong>
+                    {" · "}<strong>{nbOrders} commande{nbOrders > 1 ? "s" : ""}</strong>
+                    {c.samples.size > 0 && <> · exemple : <code style={{ background: "var(--bg)", padding: "1px 5px", borderRadius: 3 }}>{[...c.samples][0]}</code></>}
+                  </div>
+                  {hint && <div style={{ fontSize: 12, color: "var(--ink-muted)", marginTop: 4 }}>💡 {hint}</div>}
+                </div>
+              );
+            })}
+          </div>
+
+          <details>
+            <summary style={{ cursor: "pointer", fontSize: 12, color: "var(--ink-muted)", marginBottom: 8 }}>
+              Voir le détail ligne par ligne
+            </summary>
           <div style={{ overflowX: "auto", maxHeight: 220, overflowY: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
               <thead>
@@ -973,6 +1061,7 @@ function StepValidateAndSend({ formattedRows, spacefillFields, clientId, embedTo
               </tbody>
             </table>
           </div>
+          </details>
         </div>
       )}
 
@@ -995,9 +1084,40 @@ function StepValidateAndSend({ formattedRows, spacefillFields, clientId, embedTo
             {refsCreated && refErrors.length === 0 ? `✅ ${unknownRefs.length} référence${unknownRefs.length > 1 ? "s" : ""} article créée${unknownRefs.length > 1 ? "s" : ""}` : `📦 ${unknownRefs.length} référence${unknownRefs.length > 1 ? "s" : ""} article inconnue${unknownRefs.length > 1 ? "s" : ""}`}
           </p>
           {!refsCreated && (
-            <button style={{ ...styles.btnPrimary, opacity: creatingRefs ? 0.7 : 1 }} onClick={createMissingRefs} disabled={creatingRefs}>
-              {creatingRefs ? "Création en cours…" : `Créer ${unknownRefs.length} référence${unknownRefs.length > 1 ? "s" : ""} automatiquement`}
-            </button>
+            <>
+              {/* Show exactly what will be created: a typo in a reference would otherwise
+                  silently add a bogus article to the client's Spacefill catalogue. */}
+              <p style={{ fontSize: 13, color: "#92400e", marginBottom: 8 }}>
+                Ces références n'existent pas encore chez Spacefill. Vérifiez-les avant création —
+                une faute de frappe créerait un article erroné dans le catalogue.
+              </p>
+              <div style={{ maxHeight: 180, overflowY: "auto", background: "#fff", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 12 }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                  <thead>
+                    <tr style={{ background: "var(--bg)" }}>
+                      <th style={{ ...styles.th, padding: "7px 12px" }}>Référence</th>
+                      <th style={{ ...styles.th, padding: "7px 12px" }}>Désignation</th>
+                      <th style={{ ...styles.th, padding: "7px 12px" }}>Lignes</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {unknownRefs.map(ref => {
+                      const rows = validRows.filter(r => (r.item_reference || r.master_item_reference) === ref);
+                      return (
+                        <tr key={ref} style={{ borderTop: "1px solid var(--border-light)" }}>
+                          <td style={{ padding: "7px 12px", fontFamily: "monospace", fontWeight: 600 }}>{ref}</td>
+                          <td style={{ padding: "7px 12px", color: "var(--ink-muted)" }}>{rows[0]?.designation || <em>(aucune)</em>}</td>
+                          <td style={{ padding: "7px 12px", color: "var(--ink-muted)" }}>{rows.length}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <button style={{ ...styles.btnPrimary, opacity: creatingRefs ? 0.7 : 1 }} onClick={createMissingRefs} disabled={creatingRefs}>
+                {creatingRefs ? "Création en cours…" : `Créer ces ${unknownRefs.length} référence${unknownRefs.length > 1 ? "s" : ""}`}
+              </button>
+            </>
           )}
         </div>
       )}
@@ -1065,6 +1185,8 @@ function StepResult({ result }) {
         </h2>
         {result.clientName && <p style={{ color: "var(--ink-muted)", marginTop: 8 }}>Client : {result.clientName}</p>}
       </div>
+
+      <StepIntro step={4} />
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 16, marginBottom: 24 }}>
         {[

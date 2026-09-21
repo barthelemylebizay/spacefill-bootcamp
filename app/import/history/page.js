@@ -11,16 +11,37 @@ export default function ImportHistory() {
   const [loading, setLoading] = useState(true);
   const [filterClient, setFilterClient] = useState("");
   const [filterStatus, setFilterStatus] = useState("");
+  const [scope, setScope] = useState(null); // which client's history we may show
 
   useEffect(() => {
-    Promise.all([
-      fetch("/api/imports").then(r => r.json()),
-      fetch("/api/clients").then(r => r.json()),
-    ]).then(([imp, cli]) => {
+    // History is per client. Without a scope this page listed every client's imports to
+    // anyone who opened the URL, so it now asks for the same identity the import screen
+    // was opened with and shows nothing otherwise.
+    const params = new URLSearchParams(window.location.search);
+    const customerId = params.get("customer_id");
+    const accessId = params.get("access");
+
+    async function load() {
+      let query = "";
+      if (customerId) {
+        query = `customer_id=${encodeURIComponent(customerId)}`;
+      } else if (accessId) {
+        const access = await fetch(`/api/accesses/${accessId}`).then(r => r.ok ? r.json() : null).catch(() => null);
+        const ids = (access?.clients || []).map(c => c.customer_id).filter(Boolean);
+        if (ids.length) query = ids.map(id => `customer_id=${encodeURIComponent(id)}`)[0];
+        setScope(access?.name || null);
+      }
+      if (!query) { setImports([]); setClients([]); setLoading(false); return; }
+
+      const [imp, cli] = await Promise.all([
+        fetch(`/api/imports?${query}`).then(r => r.json()).catch(() => []),
+        fetch(`/api/clients?${query}`).then(r => r.json()).catch(() => []),
+      ]);
       setImports(Array.isArray(imp) ? imp : []);
       setClients(Array.isArray(cli) ? cli : []);
       setLoading(false);
-    });
+    }
+    load();
   }, []);
 
   const filtered = imports.filter(i => {

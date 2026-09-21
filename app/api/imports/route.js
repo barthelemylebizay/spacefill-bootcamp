@@ -1,11 +1,30 @@
 import supabase from "@/lib/supabase";
 
+import { resolveClientIds } from "@/lib/client-scope";
+
+// The history list omits raw_file / logs / api_result on purpose: those hold the client's
+// actual order data, and this route is reachable by anyone with an embed link. It is also
+// scoped — it used to return every client's imports (and, since retention was added, their
+// uploaded files) to whoever asked.
+const LIST_COLUMNS = "id, client_id, file_name, file_type, total_rows, valid_rows, error_rows, ignored_rows, status, spacefill_order_id, spacefill_order_status, created_at, updated_at";
+
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
   const clientId = searchParams.get("client_id");
-  let q = supabase.from("imports").select("*, clients(name)").order("created_at", { ascending: false });
-  if (clientId) q = q.eq("client_id", clientId);
-  const { data, error } = await q;
+  const customerId = searchParams.get("customer_id");
+
+  let ids = [];
+  if (clientId) ids = [clientId];
+  else if (customerId) ids = await resolveClientIds(customerId);
+  else return Response.json([]); // fail closed rather than list every client's imports
+
+  if (!ids.length) return Response.json([]);
+
+  const { data, error } = await supabase
+    .from("imports")
+    .select(LIST_COLUMNS + ", clients(name)")
+    .in("client_id", ids)
+    .order("created_at", { ascending: false });
   if (error) return Response.json({ error: error.message }, { status: 500 });
   return Response.json(data);
 }
