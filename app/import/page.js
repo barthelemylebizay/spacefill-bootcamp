@@ -278,14 +278,29 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
     if (f.field_key.startsWith("delivery_")) return !isEntry;
     return true;
   };
-  const orderFields = spacefillFields.filter(f => !f.is_hidden && !isItemField(f) && matchesOrderDirection(f));
-  const itemFields = spacefillFields.filter(f => !f.is_hidden && isItemField(f));
+  // A field a saved profile already maps must stay listed even if it has since been
+  // hidden or belongs to the other direction. Otherwise the <select> holds a value with
+  // no matching <option>, the column silently reads "Ignorer cette colonne", and the
+  // official template looked like it needed remapping by hand.
+  const mappedFieldIds = useMemo(
+    () => new Set(Object.values(preloadedMappings || {}).filter(Boolean)),
+    [preloadedMappings]
+  );
+  const isOfferable = (f) => !f.is_hidden || mappedFieldIds.has(f.id);
+
+  const orderFields = spacefillFields.filter(f => isOfferable(f) && !isItemField(f) && (matchesOrderDirection(f) || mappedFieldIds.has(f.id)));
+  const itemFields = spacefillFields.filter(f => isOfferable(f) && isItemField(f));
 
   // Suggestions must RECOMPUTE when the fields list or the matching history finish
   // loading. They arrive over the network, so a one-shot useState initializer ran
   // against empty arrays and the intelligence never applied (worse on Vercel, where
   // the round-trip is slower than on localhost).
-  const candidateFields = useMemo(() => [...orderFields, ...itemFields], [spacefillFields, orderType]);
+  // Suggestions only ever propose currently-offered fields — a legacy field kept visible
+  // for an existing profile must not be suggested for a brand new column.
+  const candidateFields = useMemo(
+    () => [...orderFields, ...itemFields].filter(f => !f.is_hidden),
+    [spacefillFields, orderType, mappedFieldIds]
+  );
   const sampleRows = useMemo(
     () => parsed.rows.slice(headerRow + 1, headerRow + 21),
     [parsed.rows, headerRow]
@@ -651,14 +666,14 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
                           <optgroup label="─── En-tête de commande ───">
                             {filteredOrderFields.map(f => (
                               <option key={f.id} value={f.id} disabled={usedElsewhere.has(f.id)}>
-                                {f.label}{f.is_required ? " *" : ""}{f.is_custom ? " ◆" : ""}{usedElsewhere.has(f.id) ? " (déjà utilisé)" : ""}
+                                {f.label}{f.is_required ? " *" : ""}{f.is_custom ? " ◆" : ""}{f.is_hidden ? " (ancien champ)" : ""}{usedElsewhere.has(f.id) ? " (déjà utilisé)" : ""}
                               </option>
                             ))}
                           </optgroup>
                           <optgroup label="─── Ligne de commande ───">
                             {filteredItemFields.map(f => (
                               <option key={f.id} value={f.id} disabled={usedElsewhere.has(f.id)}>
-                                {f.label}{f.is_required ? " *" : ""}{f.is_custom ? " ◆" : ""}{usedElsewhere.has(f.id) ? " (déjà utilisé)" : ""}
+                                {f.label}{f.is_required ? " *" : ""}{f.is_custom ? " ◆" : ""}{f.is_hidden ? " (ancien champ)" : ""}{usedElsewhere.has(f.id) ? " (déjà utilisé)" : ""}
                               </option>
                             ))}
                           </optgroup>
