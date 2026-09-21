@@ -321,6 +321,14 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
     () => parsed.rows.slice(headerRow + 1, headerRow + 21),
     [parsed.rows, headerRow]
   );
+  // Which columns actually carry data — used both to hide empty ones and to explain why
+  // a column is being ignored.
+  const columnHasData = useMemo(
+    () => headers.map((_, i) => sampleRows.some(r => String(r?.[i] ?? "").trim() !== "")),
+    [headers.join(" "), sampleRows]
+  );
+  const emptyCount = columnHasData.filter(v => !v).length;
+
   const suggestions = useMemo(
     () => suggestMappings(headers, candidateFields, mappingHistory, sampleRows),
     [headers.join(" "), candidateFields, mappingHistory, sampleRows]
@@ -349,7 +357,11 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
     // so going in column order let an early weak match (e.g. "Nom Client", scored 60)
     // claim a field that a later, stronger match (a confirmed historical one, 95) deserved.
     [...suggestions]
-      .filter(s => s.suggestedField)
+      // A column with no data anywhere in the file has nothing to send, so mapping it
+      // only inflates the "x / y colonnes mappées" count and — because the hide filter
+      // keeps mapped columns visible — made "Masquer les colonnes vides" look broken
+      // on real files, where empty columns still carry meaningful headers.
+      .filter((s, i) => s.suggestedField && columnHasData[i])
       .sort((a, b) => b.confidence - a.confidence)
       .forEach(s => {
         if (m[s.sourceColumn]) return;               // profile already decided this column
@@ -358,7 +370,7 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
         used.add(s.suggestedField.id);
       });
     setMappings(m);
-  }, [suggestions, preloadedMappings, headers.join(" ")]);
+  }, [suggestions, preloadedMappings, headers.join(" "), columnHasData]);
 
   const [search, setSearch] = useState("");
   const [saveModal, setSaveModal] = useState(false);
@@ -370,6 +382,14 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
   const [savedProfileName, setSavedProfileName] = useState(null); // set once saved, to confirm in place
   const [saveError, setSaveError] = useState("");
   const [hideEmpty, setHideEmpty] = useState(false);
+  // The ⓘ in each header opens this panel on the matching entry — a hover-only tooltip
+  // is invisible on touch screens and gives no hint that it can be acted on.
+  const [infoOuvert, setInfoOuvert] = useState(false);
+  const [infoColonne, setInfoColonne] = useState(null);
+  function ouvrirInfo(titre) {
+    setInfoColonne(titre);
+    setInfoOuvert(true);
+  }
 
   // Deliberately NOT pre-filled from the file name: a profile is reused for months, and
   // "Commandes ACME septembre" makes a poor name for it. The client names the format.
@@ -386,14 +406,6 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
 
   const filteredOrderFields = orderFields.filter(f => !search || f.label.toLowerCase().includes(search.toLowerCase()) || f.field_key.toLowerCase().includes(search.toLowerCase()));
   const filteredItemFields = itemFields.filter(f => !search || f.label.toLowerCase().includes(search.toLowerCase()) || f.field_key.toLowerCase().includes(search.toLowerCase()));
-
-  // Which columns actually carry data — used both to hide empty ones and to explain why
-  // a column is being ignored.
-  const columnHasData = useMemo(
-    () => headers.map((_, i) => sampleRows.some(r => String(r?.[i] ?? "").trim() !== "")),
-    [headers.join(" "), sampleRows]
-  );
-  const emptyCount = columnHasData.filter(v => !v).length;
 
   // Structural markers from block-based exports (FR/CL/BL/DT lines): the value repeats a
   // row-type code, never business data.
@@ -622,13 +634,17 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
 
         {/* Available on demand rather than always on screen: useful the first few times,
             noise once the user knows the table. */}
-        <details style={{ marginBottom: 12 }}>
+        <details open={infoOuvert} onToggle={e => setInfoOuvert(e.currentTarget.open)} style={{ marginBottom: 12 }}>
           <summary style={{ cursor: "pointer", fontSize: 13, fontWeight: 600, color: "var(--primary-dark)" }}>
             ⓘ Comment lire ce tableau ?
           </summary>
           <div style={{ marginTop: 10, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "12px 16px" }}>
             {COLONNES_TABLEAU.map(c => (
-              <p key={c.titre} style={{ fontSize: 13, color: "var(--ink-muted)", lineHeight: 1.55, marginBottom: 8 }}>
+              <p key={c.titre} style={{
+                fontSize: 13, color: "var(--ink-muted)", lineHeight: 1.55, marginBottom: 8,
+                background: infoColonne === c.titre ? "var(--primary-light)" : undefined,
+                borderRadius: 6, padding: infoColonne === c.titre ? "6px 8px" : undefined,
+              }}>
                 <strong style={{ color: "var(--ink)" }}>{c.titre}</strong> — {c.aide}
               </p>
             ))}
@@ -645,9 +661,19 @@ function StepDetectAndMap({ parsed, detectedProfile, detectedConfidence, spacefi
               <tr style={{ background: "var(--bg)" }}>
                 {COLONNES_TABLEAU.map(c => (
                   <th key={c.titre} style={styles.th}>
-                    <span title={c.aide} style={{ cursor: "help", borderBottom: "1px dotted var(--ink-muted)" }}>
-                      {c.titre} ⓘ
-                    </span>
+                    {c.titre}{" "}
+                    <button
+                      type="button"
+                      onClick={() => ouvrirInfo(c.titre)}
+                      title={c.aide}
+                      aria-label={`Que signifie « ${c.titre} » ?`}
+                      style={{
+                        border: "none", background: "none", padding: 0, cursor: "pointer",
+                        color: "var(--primary-dark)", fontSize: 13, lineHeight: 1,
+                      }}
+                    >
+                      ⓘ
+                    </button>
                   </th>
                 ))}
               </tr>
